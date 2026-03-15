@@ -25,6 +25,8 @@ export class RuleManager {
       captureGroup: 0,
       minFontSize: null,
       maxFontSize: null,
+      fontNameContains: "",
+      fontColor: "",
       outputTemplate: "{{match}}",
       outputFormat: {
         headingLevel: 0,
@@ -217,6 +219,230 @@ export class RuleManager {
         match: m,
         title: ((cg > 0 ? m[cg] : m[0]) ?? '').trim(),
         body: text.slice(bodyStart, bodyEnd).trim(),
+      });
+    }
+
+    return sections;
+  }
+
+  /**
+   * Returns true when font criteria (size / name) alone define section boundaries.
+   * This is the case when there is no regex pattern but at least one font criterion.
+   */
+  static hasFontTargeting(rule) {
+    if (!rule || rule.pattern) return false;
+    return rule.minFontSize != null || rule.maxFontSize != null || !!rule.fontNameContains || !!rule.fontColor;
+  }
+
+  /** Test whether a single PDF text item satisfies this rule's font criteria. */
+  static _matchesFontCriteria(item, rule) {
+    if (rule.minFontSize != null && item.fontSize < rule.minFontSize) return false;
+    if (rule.maxFontSize != null && item.fontSize > rule.maxFontSize) return false;
+    if (rule.fontNameContains &&
+        !item.fontName?.toLowerCase().includes(rule.fontNameContains.toLowerCase())) return false;
+    if (rule.fontColor && item.color !== rule.fontColor.toLowerCase()) return false;
+    return true;
+  }
+
+  /**
+   * Split an array of PDF text items into sections using font criteria as boundaries.
+   * Consecutive items that match the font criteria are merged into a section title.
+   * Items between boundaries become the section body.
+   *
+   * Returns Array<{ match: Array|null, title: string|null, body: string, bodyItems: Array }>
+   */
+  static splitItemsByFont(items, rule) {
+    if (!items?.length) return [];
+
+    // Group consecutive items into boundary (b) or body (x) runs
+    const runs = [];
+    for (const item of items) {
+      const type = RuleManager._matchesFontCriteria(item, rule) ? 'b' : 'x';
+      if (!runs.length || runs[runs.length - 1].type !== type) {
+        runs.push({ type, items: [item] });
+      } else {
+        runs[runs.length - 1].items.push(item);
+      }
+    }
+
+    const sections = [];
+    let i = 0;
+
+    // Leading preamble (body before first boundary)
+    if (runs[0]?.type === 'x') {
+      const pre = runs[0].items;
+      sections.push({ match: null, title: null, bodyItems: pre, body: pre.map(it => it.text).join(' ').trim() });
+      i = 1;
+    }
+
+    // Boundary → body pairs
+    while (i < runs.length) {
+      if (runs[i].type === 'b') {
+        const bItems = runs[i].items;
+        const title = bItems.map(it => it.text).join(' ').trim();
+        i++;
+        let bodyItems = [];
+        if (i < runs.length && runs[i].type === 'x') {
+          bodyItems = runs[i].items;
+          i++;
+        }
+        sections.push({
+          match: bItems,
+          title,
+          bodyItems,
+          body: bodyItems.map(it => it.text).join(' ').trim(),
+        });
+      } else {
+        i++;
+      }
+    }
+
+    return sections;
+  }
+
+  /**
+   * Unified split: finds section boundaries from font criteria, regex pattern, or both.
+   * Font matches and regex matches are each collected as boundaries, then merged by
+   * position and deduplicated — so a rule can use regex for numbered headers and font
+   * criteria for styled headers simultaneously.  Everything between boundaries becomes
+   * the section body, and each section carries its bodyItems for child rules to use.
+   *
+   * Returns Array<{ match, title: string|null, body: string, bodyItems: Array }>
+   * Elements with match === null are preamble (text before the first boundary).
+   */
+  static splitOnCombinedTargeting(items, rule) {
+    if (!items?.length) return [];
+
+    const hasFontCriteria = rule.minFontSize != null || rule.maxFontSize != null ||
+                            !!rule.fontNameContains || !!rule.fontColor;
+    const hasPattern = !!rule.pattern;
+
+    // No targeting at all: everything is body
+    if (!hasFontCriteria && !hasPattern) {
+      const body = items.map(i => i.text).join(' ').trim();
+      return body ? [{ match: null, title: null, body, bodyItems: items }] : [];
+    }
+
+    // Build a flat text string and record each item's character range within it
+    const offsets = [];
+    const parts = [];
+    let pos = 0;
+    for (const item of items) {
+      offsets.push({ start: pos, end: pos + item.text.length });
+      parts.push(item.text);
+      pos += item.text.length + 1; // +1 for the space separator
+    }
+    const text = parts.join(' ');
+
+    // Items whose start offset falls in [from, to)
+    const sliceItems = (from, to) =>
+      offsets.reduce((acc, o, i) => { if (o.start >= from && o.start < to) acc.push(items[i]); return acc; }, []);
+
+    const boundaries = [];
+
+    if (hasFontCriteria && hasPattern) {
+      // AND mode: run regex only on font-filtered text, then map matches back to
+      // original text positions so body slicing still works on the full item stream.
+      const filtParts = [], filtOffsets = [], origStarts = [], origEnds = [];
+      let fp = 0;
+      for (let i = 0; i < items.length; i++) {
+        if (RuleManager._matchesFontCriteria(items[i], rule)) {
+          filtOffsets.push({ start: fp, end: fp + items[i].text.length });
+          origStarts.push(offsets[i].start);
+          origEnds.push(offsets[i].end);
+          filtParts.push(items[i].text);
+          fp += items[i].text.length + 1;
+        }
+      }
+      const filtText = filtParts.join(' ');
+
+      let flags = rule.flags || 'g';
+      if (!flags.includes('g')) flags += 'g';
+      let regex;
+      try { regex = new RegExp(rule.pattern, flags); } catch (e) { /* invalid */ }
+      if (regex && filtText) {
+        const cg = rule.captureGroup ?? 0;
+        for (const m of filtText.matchAll(regex)) {
+          // Find which filtered-item index this match starts in
+          let fi = filtOffsets.findIndex(fo => fo.start <= m.index && m.index < fo.end);
+          if (fi < 0) fi = filtOffsets.findIndex(fo => fo.start > m.index); // gap → next item
+          if (fi < 0) continue;
+          // Find last filtered-item index the match touches
+          const mEnd = m.index + m[0].length;
+          let li = fi;
+          while (li + 1 < filtOffsets.length && filtOffsets[li + 1].start < mEnd) li++;
+          boundaries.push({
+            start: origStarts[fi],
+            end: origEnds[li],
+            title: (cg > 0 ? m[cg] : m[0])?.trim() ?? '',
+            source: 'both',
+            match: m,
+          });
+        }
+      }
+
+    } else if (hasFontCriteria) {
+      // Font-only: each run of consecutive matching items is one boundary
+      let runStart = null, runEnd = null, runItems = [];
+      const flush = () => {
+        if (runItems.length) {
+          boundaries.push({ start: runStart, end: runEnd, title: runItems.map(i => i.text).join(' ').trim(), source: 'font' });
+          runItems = []; runStart = runEnd = null;
+        }
+      };
+      for (let i = 0; i < items.length; i++) {
+        if (RuleManager._matchesFontCriteria(items[i], rule)) {
+          if (!runItems.length) runStart = offsets[i].start;
+          runEnd = offsets[i].end;
+          runItems.push(items[i]);
+        } else { flush(); }
+      }
+      flush();
+
+    } else {
+      // Regex-only: match against the full text
+      let flags = rule.flags || 'g';
+      if (!flags.includes('g')) flags += 'g';
+      let regex;
+      try { regex = new RegExp(rule.pattern, flags); } catch (e) { /* invalid */ }
+      if (regex) {
+        const cg = rule.captureGroup ?? 0;
+        for (const m of text.matchAll(regex)) {
+          boundaries.push({ start: m.index, end: m.index + m[0].length, title: (cg > 0 ? m[cg] : m[0])?.trim() ?? '', source: 'regex', match: m });
+        }
+      }
+    }
+
+    if (!boundaries.length) {
+      return [{ match: null, title: null, body: text.trim(), bodyItems: items }];
+    }
+
+    // Sort and deduplicate (first wins on overlap)
+    boundaries.sort((a, b) => a.start - b.start);
+    const merged = [];
+    let lastEnd = 0;
+    for (const b of boundaries) {
+      if (b.start >= lastEnd) { merged.push(b); lastEnd = b.end; }
+    }
+
+    const sections = [];
+
+    // Preamble
+    if (merged[0].start > 0) {
+      const pre = text.slice(0, merged[0].start).trim();
+      if (pre) sections.push({ match: null, title: null, body: pre, bodyItems: sliceItems(0, merged[0].start) });
+    }
+
+    for (let i = 0; i < merged.length; i++) {
+      const b = merged[i];
+      const next = merged[i + 1];
+      const bodyStart = b.end;
+      const bodyEnd = next ? next.start : text.length;
+      sections.push({
+        match: b.match ?? b,
+        title: b.title,
+        body: text.slice(bodyStart, bodyEnd).trim(),
+        bodyItems: sliceItems(bodyStart, bodyEnd),
       });
     }
 

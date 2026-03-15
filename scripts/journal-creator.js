@@ -41,8 +41,8 @@ export class JournalCreator {
       return;
     }
 
-    const text = await JournalCreator._getTextForRule(rule, pdfParser, ranges);
-    const sections = RuleManager.splitOnPattern(text, rule);
+    const items = await pdfParser.getPagesItems(ranges);
+    const sections = RuleManager.splitOnCombinedTargeting(items, rule);
     const namedSections = sections.filter(s => s.match !== null);
 
     if (!namedSections.length) {
@@ -59,17 +59,15 @@ export class JournalCreator {
         category = await JournalCreator._getOrCreateCategory(journal, catName);
       }
 
-      const headingLevel = rule.outputFormat?.headingLevel || 2;
-      const titleHTML = `<h${headingLevel}>${section.title}</h${headingLevel}>`;
       const bodyHTML = await JournalCreator._buildBodyHTML(
-        section.body, rule.children, pdfParser, ranges
+        section.body, section.bodyItems, rule.children, pdfParser, ranges
       );
 
       if (rule.createsNewPage) {
         const pageData = {
           name: section.title,
           type: "text",
-          text: { content: titleHTML + bodyHTML, format: 1 },
+          text: { content: bodyHTML, format: 1 },
         };
         if (category) pageData.category = category;
         await journal.createEmbeddedDocuments("JournalEntryPage", [pageData]);
@@ -85,25 +83,20 @@ export class JournalCreator {
    * Text between child matches is output as paragraphs.
    * If no child rules, the raw text is wrapped in <p>.
    */
-  static async _buildBodyHTML(text, children, pdfParser, parentRanges) {
-    if (!text) return "";
+  static async _buildBodyHTML(text, bodyItems, children, pdfParser, parentRanges) {
+    if (!text && !bodyItems?.length) return "";
 
-    const primaryChild = children?.find(c => c.pattern);
+    const primaryChild = children?.find(c => c.pattern || c.minFontSize != null || c.maxFontSize != null || c.fontNameContains || c.fontColor);
     if (!primaryChild) {
-      return `<p>${text}</p>`;
+      return text ? `<p>${text}</p>` : "";
     }
 
-    // Apply font size filter to child if needed
-    const childText = await JournalCreator._getFilteredText(
-      text, primaryChild, pdfParser, parentRanges
-    );
+    const sections = RuleManager.splitOnCombinedTargeting(bodyItems ?? [], primaryChild);
 
-    const sections = RuleManager.splitOnPattern(childText, primaryChild);
     let html = "";
 
     for (const sec of sections) {
       if (sec.match === null) {
-        // Preamble — output as paragraph(s)
         if (sec.body) html += `<p>${sec.body}</p>`;
         continue;
       }
@@ -111,21 +104,21 @@ export class JournalCreator {
       const level = primaryChild.outputFormat?.headingLevel || 3;
       const titleHTML = `<h${level}>${sec.title}</h${level}>`;
       const subBody = await JournalCreator._buildBodyHTML(
-        sec.body, primaryChild.children, pdfParser, parentRanges
+        sec.body, sec.bodyItems, primaryChild.children, pdfParser, parentRanges
       );
       html += titleHTML + (subBody || (sec.body ? `<p>${sec.body}</p>` : ""));
     }
 
-    return html || `<p>${text}</p>`;
+    return html || (text ? `<p>${text}</p>` : "");
   }
 
   // ── Text helpers ──────────────────────────────────────────────────────────
 
   static async _getTextForRule(rule, pdfParser, ranges) {
-    const hasFontFilter = rule.minFontSize != null || rule.maxFontSize != null;
+    const hasFontFilter = rule.minFontSize != null || rule.maxFontSize != null || rule.fontNameContains;
     if (hasFontFilter) {
       const items = await pdfParser.getPagesItems(ranges);
-      const filtered = PDFParser.filterByFontSize(items, rule.minFontSize, rule.maxFontSize);
+      const filtered = PDFParser.filterByCriteria(items, rule);
       return PDFParser.itemsToText(filtered);
     }
     return pdfParser.getPagesText(ranges);
@@ -137,10 +130,10 @@ export class JournalCreator {
    * Otherwise return the text as-is.
    */
   static async _getFilteredText(text, rule, pdfParser, parentRanges) {
-    const hasFontFilter = rule.minFontSize != null || rule.maxFontSize != null;
+    const hasFontFilter = rule.minFontSize != null || rule.maxFontSize != null || rule.fontNameContains;
     if (hasFontFilter && parentRanges && pdfParser) {
       const items = await pdfParser.getPagesItems(parentRanges);
-      const filtered = PDFParser.filterByFontSize(items, rule.minFontSize, rule.maxFontSize);
+      const filtered = PDFParser.filterByCriteria(items, rule);
       return PDFParser.itemsToText(filtered);
     }
     return text;

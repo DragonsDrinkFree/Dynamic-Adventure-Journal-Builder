@@ -191,8 +191,8 @@
 /* ── Editor panel ─────────────────────────────────────────────── */
 
 .dajb-editor-panel {
-  width: 400px;
-  min-width: 280px;
+  width: 460px;
+  min-width: 320px;
   flex-shrink: 0;
   background: #1d1d1d;
   overflow-y: auto;
@@ -241,7 +241,7 @@
 
 .dajb-field > span {
   flex-shrink: 0;
-  width: 130px;
+  width: 150px;
   color: #999;
   text-align: right;
 }
@@ -281,6 +281,11 @@
   gap: 12px;
 }
 
+.dajb-field-row .dajb-field > span {
+  width: auto;
+  min-width: 40px;
+}
+
 .dajb-fieldset {
   border: 1px solid #333;
   border-radius: 4px;
@@ -306,6 +311,9 @@
   font-size: 10px;
   color: #666;
   margin-left: 2px;
+  display: block;
+  white-space: normal;
+  line-height: 1.4;
 }
 
 /* ── Preview panel ────────────────────────────────────────────── */
@@ -442,6 +450,77 @@ mark.dajb-match {
   color: #111;
   border-radius: 2px;
   padding: 0 1px;
+}
+
+/* ── Font Inspector ───────────────────────────────────────────── */
+
+.dajb-icon-btn.active {
+  color: #7ec8e3;
+  background: #1a3a5a;
+}
+
+.dajb-font-inspector {
+  padding: 8px;
+}
+
+.dajb-font-inspector-header {
+  font-size: 11px;
+  color: #888;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #333;
+}
+
+.dajb-font-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  color: #bbb;
+}
+
+.dajb-font-table th {
+  text-align: left;
+  color: #777;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 3px 6px;
+  border-bottom: 1px solid #333;
+}
+
+.dajb-font-table td {
+  padding: 3px 6px;
+  border-bottom: 1px solid #1e1e1e;
+  vertical-align: top;
+}
+
+.dajb-font-table tr:hover td { background: #222; }
+
+.dajb-font-apply-cell { width: 24px; padding: 2px 4px !important; }
+.dajb-font-apply-btn { font-size: 13px; font-weight: bold; color: #7ec8e3; padding: 0 4px; }
+.dajb-font-apply-btn:hover { background: #1a3a5a; color: #fff; }
+.dajb-font-name { color: #aaa; font-size: 10px; }
+.dajb-font-size { color: #7ec8e3; white-space: nowrap; }
+.dajb-font-color { white-space: nowrap; font-size: 10px; color: #aaa; }
+.dajb-font-count { color: #888; }
+.dajb-font-sample { color: #666; font-size: 10px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.dajb-color-swatch {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+  border: 1px solid #555;
+  vertical-align: middle;
+  margin-right: 4px;
+  flex-shrink: 0;
+}
+
+.dajb-color-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
 }
 
 /* ── Scrollbars ───────────────────────────────────────────────── */

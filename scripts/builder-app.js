@@ -27,7 +27,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       "add-child-rule":function(ev, t) { BuilderApp._onAddChildRule.call(this, ev, t); },
       "delete-rule":   function(ev, t) { BuilderApp._onDeleteRule.call(this, ev, t); },
       "select-rule":   function(ev, t) { BuilderApp._onSelectRule.call(this, ev, t); },
-      "collapse-rule": function(ev, t) { BuilderApp._onCollapseRule.call(this, ev, t); },
+      "collapse-rule":    function(ev, t) { BuilderApp._onCollapseRule.call(this, ev, t); },
+      "inspect-fonts":    function(ev, t) { BuilderApp._onInspectFonts.call(this, ev, t); },
     },
   };
 
@@ -47,6 +48,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     this.selectedRuleId = null;
     this._pdfFileName = null;
     this._collapsedIds = new Set();
+    this._inspectingFonts = false;
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -203,18 +205,29 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         </label>
 
         <fieldset class="dajb-fieldset">
-          <legend>Font Size Filter</legend>
+          <legend>Font Targeting</legend>
           <div class="dajb-field-row">
             <label class="dajb-field">
-              <span>Min (pt)</span>
+              <span>Min Size (pt)</span>
               <input type="number" data-field="minFontSize" value="${rule.minFontSize ?? ""}" min="0" step="0.5" placeholder="Any" style="width:70px" />
             </label>
             <label class="dajb-field">
-              <span>Max (pt)</span>
+              <span>Max Size (pt)</span>
               <input type="number" data-field="maxFontSize" value="${rule.maxFontSize ?? ""}" min="0" step="0.5" placeholder="Any" style="width:70px" />
             </label>
           </div>
-          <em class="dajb-hint">Pre-filters text by font size before regex runs. Leave blank to match all sizes.</em>
+          <label class="dajb-field">
+            <span>Font Name Contains</span>
+            <input type="text" data-field="fontNameContains" value="${this._esc(rule.fontNameContains ?? '')}" placeholder="e.g. Bold, Garamond" />
+          </label>
+          <label class="dajb-field">
+            <span>Font Color</span>
+            <div class="dajb-color-field">
+              ${rule.fontColor ? `<span class="dajb-color-swatch" style="background:${this._esc(rule.fontColor)}"></span>` : ''}
+              <input type="text" data-field="fontColor" value="${this._esc(rule.fontColor ?? '')}" placeholder="#rrggbb (from Inspector)" class="dajb-monospace" style="width:140px" />
+            </div>
+          </label>
+          <em class="dajb-hint">Use the Fonts inspector to discover font names and colors. With no regex pattern, font criteria alone defines section boundaries — each matching run becomes the section title.</em>
         </fieldset>
 
         <fieldset class="dajb-fieldset">
@@ -299,9 +312,13 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       if (label) label.textContent = value || "(unnamed)";
     }
 
-    // Refresh preview on pattern/flags/pageRanges/fontSize changes
-    if (["pattern", "flags", "pageRanges", "captureGroup", "minFontSize", "maxFontSize"].includes(field)) {
-      this._renderPreview();
+    // Refresh preview (or keep inspector open) on targeting-related changes
+    if (["pattern", "flags", "pageRanges", "captureGroup", "minFontSize", "maxFontSize", "fontNameContains", "fontColor"].includes(field)) {
+      if (this._inspectingFonts) {
+        this._renderFontInspector();
+      } else {
+        this._renderPreview();
+      }
     }
   }
 
@@ -332,8 +349,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         return;
       }
 
-      const text = await this._getTextForRule(topRule, ranges);
-      const sections = RuleManager.splitOnPattern(text, topRule);
+      const items = await this.pdfParser.getPagesItems(ranges);
+      const sections = RuleManager.splitOnCombinedTargeting(items, topRule);
       const named = sections.filter(s => s.match);
 
       const wrap = document.createElement("div");
@@ -391,11 +408,10 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     titleEl.textContent = sec.title;
     el.appendChild(titleEl);
 
-    if (sec.body) {
-      // Find the first child rule that has a pattern — use it to subdivide
-      const childRule = rule.children?.find(c => c.pattern);
+    if (sec.bodyItems?.length || sec.body) {
+      const childRule = rule.children?.find(c => c.pattern || c.minFontSize != null || c.maxFontSize != null || c.fontNameContains || c.fontColor);
       if (childRule) {
-        const childSections = RuleManager.splitOnPattern(sec.body, childRule);
+        const childSections = RuleManager.splitOnCombinedTargeting(sec.bodyItems ?? [], childRule);
         for (const childSec of childSections) {
           el.appendChild(this._buildSectionEl(childSec, childRule, depth + 1));
         }
@@ -412,12 +428,12 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     return el;
   }
 
-  /** Get text for a rule, applying font-size filter if set. */
+  /** Get text for a rule, applying font criteria as a pre-filter when paired with a regex. */
   async _getTextForRule(rule, ranges) {
-    const hasFontFilter = rule.minFontSize != null || rule.maxFontSize != null;
+    const hasFontFilter = rule.minFontSize != null || rule.maxFontSize != null || rule.fontNameContains;
     if (hasFontFilter) {
       const items = await this.pdfParser.getPagesItems(ranges);
-      const filtered = PDFParser.filterByFontSize(items, rule.minFontSize, rule.maxFontSize);
+      const filtered = PDFParser.filterByCriteria(items, rule);
       return PDFParser.itemsToText(filtered);
     }
     return this.pdfParser.getPagesText(ranges);
@@ -537,6 +553,105 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     if (this._collapsedIds.has(ruleId)) this._collapsedIds.delete(ruleId);
     else this._collapsedIds.add(ruleId);
     this._renderRulesTree();
+  }
+
+  // ── Font Inspector ────────────────────────────────────────────────────────
+
+  static _onInspectFonts(event, target) {
+    this._inspectingFonts = !this._inspectingFonts;
+    const btn = this.element.querySelector("[data-action='inspect-fonts']");
+    if (btn) btn.classList.toggle("active", this._inspectingFonts);
+    if (this._inspectingFonts) {
+      this._renderFontInspector();
+    } else {
+      this._renderPreview();
+    }
+  }
+
+  async _renderFontInspector() {
+    const container = this.element?.querySelector("#dajb-preview-content");
+    if (!container) return;
+
+    if (!this.pdfParser.totalPages) {
+      container.innerHTML = '<div class="dajb-preview-empty">Load a PDF first.</div>';
+      return;
+    }
+
+    const topRule = this.selectedRuleId
+      ? this.ruleManager.getTopLevelAncestor(this.selectedRuleId)
+      : this.ruleManager.getTopLevelRules()[0];
+
+    if (!topRule) {
+      container.innerHTML = '<div class="dajb-preview-empty">Select or create a rule with page ranges set.</div>';
+      return;
+    }
+
+    const ranges = this.ruleManager.parsePageRanges(topRule.pageRanges);
+    if (!ranges.length) {
+      container.innerHTML = '<div class="dajb-preview-empty">Set page ranges on the top-level rule first.</div>';
+      return;
+    }
+
+    container.innerHTML = '<div class="dajb-preview-empty">Scanning fonts…</div>';
+
+    try {
+      const items = await this.pdfParser.getPagesItems(ranges);
+      const summary = PDFParser.getFontSummary(items);
+
+      const wrap = document.createElement('div');
+      wrap.className = 'dajb-font-inspector';
+
+      const hdr = document.createElement('div');
+      hdr.className = 'dajb-font-inspector-header';
+      hdr.textContent = `${summary.length} font/size combinations — ${items.length} total items — pages ${topRule.pageRanges}`;
+      wrap.appendChild(hdr);
+
+      const table = document.createElement('table');
+      table.className = 'dajb-font-table';
+      table.innerHTML = `<thead><tr>
+        <th></th><th>Font Name</th><th>Size (pt)</th><th>Color</th><th>Count</th><th>Sample Text</th>
+      </tr></thead>`;
+
+      const canApply = !!this.selectedRuleId;
+      const tbody = document.createElement('tbody');
+      for (const row of summary) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td class="dajb-font-apply-cell">
+            ${canApply ? `<button type="button" class="dajb-icon-btn dajb-font-apply-btn" title="Apply to selected rule">+</button>` : ''}
+          </td>
+          <td class="dajb-monospace dajb-font-name">${this._esc(row.fontName || '(unknown)')}</td>
+          <td class="dajb-font-size">${row.fontSize}</td>
+          <td class="dajb-font-color">
+            <span class="dajb-color-swatch" style="background:${this._esc(row.color)}"></span>
+            <span class="dajb-monospace">${this._esc(row.color)}</span>
+          </td>
+          <td class="dajb-font-count">${row.count}</td>
+          <td class="dajb-font-sample">${this._esc(row.sample)}</td>
+        `;
+        if (canApply) {
+          tr.querySelector('.dajb-font-apply-btn').addEventListener('click', () => {
+            this.ruleManager.updateRule(this.selectedRuleId, {
+              fontNameContains: row.fontName,
+              fontColor: row.color !== '#000000' ? row.color : '',
+              minFontSize: row.fontSize,
+              maxFontSize: row.fontSize,
+            });
+            this._renderEditor();
+            this._renderFontInspector();
+          });
+        }
+        tbody.appendChild(tr);
+      }
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+
+      container.innerHTML = '';
+      container.appendChild(wrap);
+    } catch (err) {
+      container.innerHTML = `<div class="dajb-preview-empty">Error: ${err.message}</div>`;
+      console.error('DAJB font inspector error', err);
+    }
   }
 
   // ── Utility ───────────────────────────────────────────────────────────────

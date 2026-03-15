@@ -137,6 +137,7 @@ export class PDFParser {
         text: item.str,
         fontSize: Math.abs(item.transform?.[3] ?? 0),
         fontName: item.fontName ?? "",
+        color: PDFParser._colorToHex(item.color),
       }));
     this._itemCache.set(pageNum, items);
     return items;
@@ -159,6 +160,19 @@ export class PDFParser {
   }
 
   /**
+   * Convert a PDF.js color array [r, g, b] (0–255) to a lowercase hex string.
+   * Returns "#000000" if color data is unavailable (older PDF.js builds).
+   * @param {Array|Uint8ClampedArray|undefined} color
+   * @returns {string}
+   */
+  static _colorToHex(color) {
+    if (!color || color.length < 3) return "#000000";
+    return "#" + Array.from(color).slice(0, 3)
+      .map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0"))
+      .join("");
+  }
+
+  /**
    * Filter an items array by font size bounds (null = no bound).
    * @param {Array<{text:string, fontSize:number}>} items
    * @param {number|null} minFontSize
@@ -171,6 +185,44 @@ export class PDFParser {
       if (maxFontSize != null && item.fontSize > maxFontSize) return false;
       return true;
     });
+  }
+
+  /**
+   * Filter items by all font criteria on a rule (size + name).
+   * @param {Array} items
+   * @param {Object} rule
+   * @returns {Array}
+   */
+  static filterByCriteria(items, rule) {
+    return items.filter((item) => {
+      if (rule.minFontSize != null && item.fontSize < rule.minFontSize) return false;
+      if (rule.maxFontSize != null && item.fontSize > rule.maxFontSize) return false;
+      if (rule.fontNameContains &&
+          !item.fontName?.toLowerCase().includes(rule.fontNameContains.toLowerCase())) return false;
+      if (rule.fontColor && item.color !== rule.fontColor.toLowerCase()) return false;
+      return true;
+    });
+  }
+
+  /**
+   * Summarise items by (fontName, rounded fontSize), sorted by count descending.
+   * Used by the Font Inspector to help users identify which font corresponds to their target text.
+   * @param {Array} items
+   * @returns {Array<{fontName:string, fontSize:number, count:number, sample:string}>}
+   */
+  static getFontSummary(items) {
+    const map = new Map();
+    for (const item of items) {
+      const size = Math.round(item.fontSize * 2) / 2; // round to nearest 0.5 pt
+      const key = `${item.fontName}||${size}||${item.color ?? '#000000'}`;
+      if (!map.has(key)) {
+        map.set(key, { fontName: item.fontName || '', fontSize: size, color: item.color ?? '#000000', count: 0, sample: '' });
+      }
+      const entry = map.get(key);
+      entry.count++;
+      if (!entry.sample && item.text.trim()) entry.sample = item.text.trim().slice(0, 50);
+    }
+    return [...map.values()].sort((a, b) => b.count - a.count);
   }
 
   /**
