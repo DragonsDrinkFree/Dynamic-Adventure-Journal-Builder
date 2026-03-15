@@ -1,0 +1,22 @@
+{
+  "id": "dynamic-adventure-journal-builder",
+  "title": "Dynamic Adventure Journal Builder",
+  "version": "1.0.0",
+  "compatibility": {
+    "minimum": "13",
+    "verified": "13"
+  },
+  "authors": [
+    {
+      "name": "GravyBoat, DragonsDrinkFree",
+      "url": "https://www.patreon.com/dragonsdrinkfree",
+      "flags": {}
+    }
+  ],
+  "flags": {
+    "canUpload": true
+  },
+  "description": "Parse PDFs with regex rules and generate structured Foundry journal entries.",
+  "esmodules": ["scripts/main.js"],
+  "styles": ["styles/builder.css"]
+}

@@ -1,0 +1,67 @@
+{{!-- Adventure Journal Builder — main layout --}}
+<div class="dajb-layout">
+
+  {{!-- Toolbar --}}
+  <div class="dajb-toolbar">
+    <div class="dajb-toolbar-left">
+      <button type="button" data-action="load-pdf" class="dajb-btn">
+        <i class="fas fa-file-pdf"></i>
+        {{#if pdfLoaded}}Change PDF{{else}}Load PDF{{/if}}
+      </button>
+      <span id="dajb-pdf-status" class="dajb-pdf-status">
+        {{#if pdfLoaded}}
+          {{pdfFileName}} ({{pdfPages}} pages)
+        {{else}}
+          No PDF loaded
+        {{/if}}
+      </span>
+    </div>
+    <div class="dajb-toolbar-right">
+      <button type="button" data-action="load-rules" class="dajb-btn" title="Load rules from JSON file">
+        <i class="fas fa-folder-open"></i> Load Rules
+      </button>
+      <button type="button" data-action="save-rules" class="dajb-btn" title="Save rules to JSON file">
+        <i class="fas fa-save"></i> Save Rules
+      </button>
+      <button type="button" data-action="build-journal" class="dajb-btn dajb-btn-primary" title="Parse PDF and create journal entries">
+        <i class="fas fa-hammer"></i> Build Journal
+      </button>
+    </div>
+  </div>
+
+  {{!-- Three-panel body --}}
+  <div class="dajb-panels">
+
+    {{!-- Left: Rules Tree --}}
+    <div class="dajb-rules-panel">
+      <div class="panel-header">
+        <span>Rules</span>
+        <button type="button" data-action="add-top-rule" title="Add top-level section rule" class="dajb-icon-btn">
+          <i class="fas fa-plus"></i>
+        </button>
+      </div>
+      <div class="dajb-rules-tree" id="dajb-rules-tree">
+        {{!-- dynamically populated by BuilderApp._renderRulesTree() --}}
+      </div>
+    </div>
+
+    {{!-- Center: Rule Editor --}}
+    <div class="dajb-editor-panel" id="dajb-editor-panel">
+      <div class="dajb-no-selection">
+        <i class="fas fa-arrow-left"></i>
+        Select a rule to edit
+      </div>
+    </div>
+
+    {{!-- Right: Live Preview --}}
+    <div class="dajb-preview-panel">
+      <div class="panel-header">
+        <span>Live Preview</span>
+      </div>
+      <div class="dajb-preview-content" id="dajb-preview-content">
+        Load a PDF and select a rule to see matches.
+      </div>
+    </div>
+
+  </div>{{!-- /.dajb-panels --}}
+</div>{{!-- /.dajb-layout --}}
