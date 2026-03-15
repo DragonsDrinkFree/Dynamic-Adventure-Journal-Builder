@@ -308,113 +308,119 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
   // ── Preview Panel ─────────────────────────────────────────────────────────
 
   async _renderPreview() {
-    const container = this.element.querySelector("#dajb-preview-content");
+    const container = this.element?.querySelector("#dajb-preview-content");
     if (!container) return;
 
     if (!this.selectedRuleId) {
-      container.textContent = "Select a rule to see matches.";
+      container.innerHTML = '<div class="dajb-preview-empty">Select a rule to see the document structure.</div>';
       return;
     }
-
-    const rule = this.ruleManager.getRuleById(this.selectedRuleId);
-    if (!rule) return;
-
     if (!this.pdfParser.totalPages) {
-      container.textContent = "Load a PDF to see matches.";
+      container.innerHTML = '<div class="dajb-preview-empty">Load a PDF to see the document structure.</div>';
       return;
     }
 
-    const hasFontFilter = rule.minFontSize != null || rule.maxFontSize != null;
-    if (!rule.pattern && !hasFontFilter) {
-      container.textContent = "Enter a regex pattern or font size filter to see matches.";
-      return;
-    }
+    const topRule = this.ruleManager.getTopLevelAncestor(this.selectedRuleId);
+    if (!topRule) return;
 
-    container.textContent = "Computing…";
+    container.innerHTML = '<div class="dajb-preview-empty">Building preview…</div>';
 
     try {
-      const isTopLevel = this.ruleManager.getTopLevelRules().some((r) => r.id === rule.id);
-      let text;
-      if (isTopLevel) {
-        const ranges = this.ruleManager.parsePageRanges(rule.pageRanges);
-        if (!ranges.length) {
-          container.textContent = "Enter page ranges to see matches.";
-          return;
-        }
-        if (hasFontFilter) {
-          const items = await this.pdfParser.getPagesItems(ranges);
-          const filtered = PDFParser.filterByFontSize(items, rule.minFontSize, rule.maxFontSize);
-          text = PDFParser.itemsToText(filtered);
-          // If no regex, show filtered text directly as the "match"
-          if (!rule.pattern) {
-            const escFn = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-            container.innerHTML =
-              `<div class="dajb-preview-stats">${filtered.length} item${filtered.length !== 1 ? "s" : ""} after font filter</div>` +
-              `<pre class="dajb-preview-text">${escFn(text)}</pre>`;
-            return;
-          }
-        } else {
-          text = await this.pdfParser.getPagesText(ranges);
-        }
-      } else {
-        // Child rule: preview against first portion of PDF, with optional font filter
-        const allRanges = [{ start: 1, end: Math.min(20, this.pdfParser.totalPages) }];
-        if (hasFontFilter) {
-          const items = await this.pdfParser.getPagesItems(allRanges);
-          const filtered = PDFParser.filterByFontSize(items, rule.minFontSize, rule.maxFontSize);
-          text = PDFParser.itemsToText(filtered);
-          if (!rule.pattern) {
-            const escFn = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-            container.innerHTML =
-              `<div class="dajb-preview-stats">${filtered.length} item${filtered.length !== 1 ? "s" : ""} after font filter (child rule — preview scope: first 20 pages)</div>` +
-              `<pre class="dajb-preview-text">${escFn(text)}</pre>`;
-            return;
-          }
-        } else {
-          text = await this.pdfParser.getPagesText(allRanges);
-        }
-      }
-
-      // Validate regex first
-      let flags = rule.flags || "gi";
-      // Ensure "g" flag so we can iterate all matches
-      if (!flags.includes("g")) flags += "g";
-      let gRegex;
-      try {
-        gRegex = new RegExp(rule.pattern, flags);
-      } catch (e) {
-        container.textContent = `Invalid regex: ${e.message}`;
+      const ranges = this.ruleManager.parsePageRanges(topRule.pageRanges);
+      if (!ranges.length) {
+        container.innerHTML = '<div class="dajb-preview-empty">Set page ranges on the top-level rule to see structure.</div>';
         return;
       }
 
-      // Collect all match positions
-      const simpleMatches = [];
-      let sm;
-      gRegex.lastIndex = 0;
-      while ((sm = gRegex.exec(text)) !== null) {
-        simpleMatches.push({ index: sm.index, length: sm[0].length, text: sm[0] });
+      const text = await this._getTextForRule(topRule, ranges);
+      const sections = RuleManager.splitOnPattern(text, topRule);
+      const named = sections.filter(s => s.match);
+
+      const wrap = document.createElement("div");
+      wrap.className = "dajb-preview-doc";
+
+      const stats = document.createElement("div");
+      stats.className = "dajb-preview-stats";
+      stats.textContent = `${named.length} section${named.length !== 1 ? "s" : ""} — ${topRule.name}`;
+      wrap.appendChild(stats);
+
+      let shown = 0;
+      for (const sec of sections) {
+        if (sec.match && shown >= 20) {
+          const more = document.createElement("div");
+          more.className = "dajb-preview-more";
+          more.textContent = `… ${named.length - 20} more sections not shown`;
+          wrap.appendChild(more);
+          break;
+        }
+        if (sec.match) shown++;
+        wrap.appendChild(this._buildSectionEl(sec, topRule, 0));
       }
 
-      // Build highlighted HTML by slicing the original text
-      const parts = [];
-      let lastIdx = 0;
-
-      const escFn = (s) =>
-        s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
-      for (const sm2 of simpleMatches) {
-        parts.push(escFn(text.slice(lastIdx, sm2.index)));
-        parts.push(`<mark class="dajb-match">${escFn(sm2.text)}</mark>`);
-        lastIdx = sm2.index + sm2.length;
-      }
-      parts.push(escFn(text.slice(lastIdx)));
-
-      container.innerHTML =
-        `<div class="dajb-preview-stats">${simpleMatches.length} match${simpleMatches.length !== 1 ? "es" : ""}</div>` +
-        `<pre class="dajb-preview-text">${parts.join("")}</pre>`;
+      container.innerHTML = "";
+      container.appendChild(wrap);
     } catch (err) {
-      container.textContent = `Error: ${err.message}`;
+      container.innerHTML = `<div class="dajb-preview-empty">Error: ${err.message}</div>`;
+      console.error("DAJB preview error", err);
     }
+  }
+
+  /**
+   * Build a DOM element representing one section (or preamble) of the document.
+   * Recursively applies child rules to the section body.
+   */
+  _buildSectionEl(sec, rule, depth) {
+    const MAX_BODY = 500;
+    const isActiveLevel = rule.id === this.selectedRuleId;
+
+    const el = document.createElement("div");
+
+    if (sec.match === null) {
+      // Preamble text — shown greyed out
+      el.className = "dajb-preview-preamble";
+      const preview = sec.body.slice(0, MAX_BODY);
+      el.textContent = preview + (sec.body.length > MAX_BODY ? "…" : "");
+      return el;
+    }
+
+    el.className = `dajb-preview-section depth-${depth}${isActiveLevel ? " active-rule" : ""}`;
+
+    // Section title
+    const titleEl = document.createElement("div");
+    titleEl.className = "dajb-preview-section-title";
+    titleEl.textContent = sec.title;
+    el.appendChild(titleEl);
+
+    if (sec.body) {
+      // Find the first child rule that has a pattern — use it to subdivide
+      const childRule = rule.children?.find(c => c.pattern);
+      if (childRule) {
+        const childSections = RuleManager.splitOnPattern(sec.body, childRule);
+        for (const childSec of childSections) {
+          el.appendChild(this._buildSectionEl(childSec, childRule, depth + 1));
+        }
+      } else {
+        // No child rule — show raw body text
+        const bodyEl = document.createElement("div");
+        bodyEl.className = "dajb-preview-body-text";
+        const preview = sec.body.slice(0, MAX_BODY);
+        bodyEl.textContent = preview + (sec.body.length > MAX_BODY ? "…" : "");
+        el.appendChild(bodyEl);
+      }
+    }
+
+    return el;
+  }
+
+  /** Get text for a rule, applying font-size filter if set. */
+  async _getTextForRule(rule, ranges) {
+    const hasFontFilter = rule.minFontSize != null || rule.maxFontSize != null;
+    if (hasFontFilter) {
+      const items = await this.pdfParser.getPagesItems(ranges);
+      const filtered = PDFParser.filterByFontSize(items, rule.minFontSize, rule.maxFontSize);
+      return PDFParser.itemsToText(filtered);
+    }
+    return this.pdfParser.getPagesText(ranges);
   }
 
   // ── Actions ───────────────────────────────────────────────────────────────

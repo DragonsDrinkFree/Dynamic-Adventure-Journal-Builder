@@ -332,6 +332,101 @@
   font-size: 12px;
 }
 
+/* ── Preview document structure ───────────────────────────────── */
+
+.dajb-preview-doc {
+  padding: 4px 0;
+}
+
+.dajb-preview-empty {
+  color: #666;
+  font-style: italic;
+  padding: 8px;
+}
+
+.dajb-preview-more {
+  color: #888;
+  font-style: italic;
+  font-size: 11px;
+  padding: 4px 8px;
+}
+
+.dajb-preview-preamble {
+  color: #555;
+  font-size: 11px;
+  font-style: italic;
+  padding: 4px 8px;
+  border-left: 2px solid #333;
+  margin: 2px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Depth-based section styling */
+.dajb-preview-section {
+  margin: 3px 0;
+  border-left: 3px solid #444;
+  border-radius: 0 3px 3px 0;
+  overflow: hidden;
+}
+
+.dajb-preview-section.depth-0 {
+  border-left-color: #4a9eba;
+  background: rgba(74, 158, 186, 0.08);
+  margin-bottom: 6px;
+}
+
+.dajb-preview-section.depth-1 {
+  border-left-color: #7ab87a;
+  background: rgba(122, 184, 122, 0.08);
+  margin-left: 12px;
+}
+
+.dajb-preview-section.depth-2 {
+  border-left-color: #c8a840;
+  background: rgba(200, 168, 64, 0.08);
+  margin-left: 12px;
+}
+
+.dajb-preview-section.depth-3 {
+  border-left-color: #b87ab8;
+  background: rgba(184, 122, 184, 0.08);
+  margin-left: 12px;
+}
+
+/* Highlight the currently selected rule's sections */
+.dajb-preview-section.active-rule {
+  border-left-width: 4px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.dajb-preview-section.depth-0.active-rule { border-left-color: #6dc8f0; }
+.dajb-preview-section.depth-1.active-rule { border-left-color: #9ade9a; }
+.dajb-preview-section.depth-2.active-rule { border-left-color: #f0d060; }
+
+.dajb-preview-section-title {
+  font-weight: bold;
+  font-size: 12px;
+  padding: 4px 8px;
+  color: #ddd;
+  background: rgba(255,255,255,0.04);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+
+.dajb-preview-section.depth-0 .dajb-preview-section-title { color: #6dc8f0; }
+.dajb-preview-section.depth-1 .dajb-preview-section-title { color: #9ade9a; }
+.dajb-preview-section.depth-2 .dajb-preview-section-title { color: #f0d060; }
+.dajb-preview-section.depth-3 .dajb-preview-section-title { color: #d898d8; }
+
+.dajb-preview-body-text {
+  padding: 4px 8px;
+  font-size: 11px;
+  color: #aaa;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.4;
+}
+
 .dajb-preview-text {
   white-space: pre-wrap;
   word-break: break-word;

@@ -1,21 +1,17 @@
 import { PDFParser } from "./pdf-parser.js";
+import { RuleManager } from "./rule-manager.js";
 
 /**
- * JournalCreator — takes the rule tree and parsed PDF text and builds
- * Foundry JournalEntry documents.
+ * JournalCreator — builds Foundry JournalEntry documents from the rule tree
+ * using the "split-on-match" paradigm: each regex match is a section boundary,
+ * and the body content is all text between consecutive boundaries.
  */
 export class JournalCreator {
-  /**
-   * Entry point.
-   * @param {import('./rule-manager.js').RuleManager} ruleManager
-   * @param {import('./pdf-parser.js').PDFParser} pdfParser
-   */
   static async build(ruleManager, pdfParser) {
     if (!pdfParser.totalPages) {
       ui.notifications.warn("DAJB | No PDF loaded — cannot build journal.");
       return;
     }
-
     const topRules = ruleManager.getTopLevelRules();
     if (!topRules.length) {
       ui.notifications.warn("DAJB | No rules defined.");
@@ -28,187 +24,132 @@ export class JournalCreator {
       try {
         await JournalCreator._processTopRule(rule, ruleManager, pdfParser);
       } catch (err) {
-        console.error(`DAJB | Error processing rule "${rule.name}":`, err);
+        console.error(`DAJB | Error in rule "${rule.name}":`, err);
         ui.notifications.error(`DAJB | Error in rule "${rule.name}": ${err.message}`);
       }
     }
 
-    ui.notifications.info("DAJB | Journal build complete!");
+    ui.notifications.info("DAJB | Build complete!");
   }
 
-  // ── Internal ─────────────────────────────────────────────────────────────
+  // ── Top-level rule ────────────────────────────────────────────────────────
 
   static async _processTopRule(rule, ruleManager, pdfParser) {
     const ranges = ruleManager.parsePageRanges(rule.pageRanges);
-    const hasFontFilter = rule.minFontSize != null || rule.maxFontSize != null;
-    let text;
-    let pageItems = null;
-    if (hasFontFilter) {
-      pageItems = await pdfParser.getPagesItems(ranges);
-      const filtered = PDFParser.filterByFontSize(pageItems, rule.minFontSize, rule.maxFontSize);
-      text = PDFParser.itemsToText(filtered);
-    } else {
-      text = await pdfParser.getPagesText(ranges);
-      pageItems = null; // will be fetched lazily if children need it
+    if (!ranges.length) {
+      console.warn(`DAJB | Rule "${rule.name}" has no valid page ranges.`);
+      return;
     }
-    const matches = JournalCreator._runRegex(text, rule);
 
-    if (!matches.length) {
+    const text = await JournalCreator._getTextForRule(rule, pdfParser, ranges);
+    const sections = RuleManager.splitOnPattern(text, rule);
+    const namedSections = sections.filter(s => s.match !== null);
+
+    if (!namedSections.length) {
       console.log(`DAJB | Rule "${rule.name}" — no matches found.`);
       return;
     }
 
-    // Resolve/create target journal
     const journal = await JournalCreator._getOrCreateJournal(rule.targetJournal || rule.name);
 
-    for (let i = 0; i < matches.length; i++) {
-      const match = matches[i];
-      const title = JournalCreator._resolveTitle(match, rule);
-      const content = JournalCreator._applyTemplate(match, rule);
-      const htmlContent = JournalCreator._applyOutputFormat(content, rule.outputFormat);
-
-      // Determine category
+    for (const section of namedSections) {
       let category = null;
       if (rule.targetCategory) {
-        if (rule.categoryMode === "dynamic") {
-          category = await JournalCreator._getOrCreateCategory(journal, title);
-        } else {
-          category = await JournalCreator._getOrCreateCategory(journal, rule.targetCategory);
-        }
+        const catName = rule.categoryMode === "dynamic" ? section.title : rule.targetCategory;
+        category = await JournalCreator._getOrCreateCategory(journal, catName);
       }
+
+      const headingLevel = rule.outputFormat?.headingLevel || 2;
+      const titleHTML = `<h${headingLevel}>${section.title}</h${headingLevel}>`;
+      const bodyHTML = await JournalCreator._buildBodyHTML(
+        section.body, rule.children, pdfParser, ranges
+      );
 
       if (rule.createsNewPage) {
         const pageData = {
-          name: title,
+          name: section.title,
           type: "text",
-          text: { content: htmlContent, format: 1 },
+          text: { content: titleHTML + bodyHTML, format: 1 },
         };
         if (category) pageData.category = category;
         await journal.createEmbeddedDocuments("JournalEntryPage", [pageData]);
       }
-
-      // Process children against the matched text (and parent page items for font size filtering)
-      if (rule.children?.length) {
-        const matchedText = match[0]; // full match string
-        for (const child of rule.children) {
-          await JournalCreator._processChildRule(child, matchedText, pageItems, pdfParser, ranges, journal, category);
-        }
-      }
     }
+  }
+
+  // ── Recursive body builder ────────────────────────────────────────────────
+
+  /**
+   * Build HTML for section body text, applying child rules recursively.
+   * The first child rule with a pattern acts as the primary splitter.
+   * Text between child matches is output as paragraphs.
+   * If no child rules, the raw text is wrapped in <p>.
+   */
+  static async _buildBodyHTML(text, children, pdfParser, parentRanges) {
+    if (!text) return "";
+
+    const primaryChild = children?.find(c => c.pattern);
+    if (!primaryChild) {
+      return `<p>${text}</p>`;
+    }
+
+    // Apply font size filter to child if needed
+    const childText = await JournalCreator._getFilteredText(
+      text, primaryChild, pdfParser, parentRanges
+    );
+
+    const sections = RuleManager.splitOnPattern(childText, primaryChild);
+    let html = "";
+
+    for (const sec of sections) {
+      if (sec.match === null) {
+        // Preamble — output as paragraph(s)
+        if (sec.body) html += `<p>${sec.body}</p>`;
+        continue;
+      }
+
+      const level = primaryChild.outputFormat?.headingLevel || 3;
+      const titleHTML = `<h${level}>${sec.title}</h${level}>`;
+      const subBody = await JournalCreator._buildBodyHTML(
+        sec.body, primaryChild.children, pdfParser, parentRanges
+      );
+      html += titleHTML + (subBody || (sec.body ? `<p>${sec.body}</p>` : ""));
+    }
+
+    return html || `<p>${text}</p>`;
+  }
+
+  // ── Text helpers ──────────────────────────────────────────────────────────
+
+  static async _getTextForRule(rule, pdfParser, ranges) {
+    const hasFontFilter = rule.minFontSize != null || rule.maxFontSize != null;
+    if (hasFontFilter) {
+      const items = await pdfParser.getPagesItems(ranges);
+      const filtered = PDFParser.filterByFontSize(items, rule.minFontSize, rule.maxFontSize);
+      return PDFParser.itemsToText(filtered);
+    }
+    return pdfParser.getPagesText(ranges);
   }
 
   /**
-   * @param {Object} rule
-   * @param {string} text - the parent match text (or font-filtered text)
-   * @param {Array|null} parentItems - page items from the parent's page range (for font filtering)
-   * @param {Object} pdfParser
-   * @param {Array} parentRanges - page ranges of the top-level ancestor
-   * @param {Object} journal
-   * @param {*} parentCategory
+   * For child rules: if the child has a font size filter, apply it to the
+   * parent page items (not the already-filtered child text).
+   * Otherwise return the text as-is.
    */
-  static async _processChildRule(rule, text, parentItems, pdfParser, parentRanges, journal, parentCategory) {
+  static async _getFilteredText(text, rule, pdfParser, parentRanges) {
     const hasFontFilter = rule.minFontSize != null || rule.maxFontSize != null;
-    let workingText = text;
-
-    if (hasFontFilter) {
-      // Font filter applies to the parent's page items; we further filter to text
-      // that overlaps the parent match. For the prototype we filter the full page items.
-      let items = parentItems;
-      if (!items) {
-        items = await pdfParser.getPagesItems(parentRanges);
-      }
+    if (hasFontFilter && parentRanges && pdfParser) {
+      const items = await pdfParser.getPagesItems(parentRanges);
       const filtered = PDFParser.filterByFontSize(items, rule.minFontSize, rule.maxFontSize);
-      workingText = PDFParser.itemsToText(filtered);
+      return PDFParser.itemsToText(filtered);
     }
-
-    const matches = JournalCreator._runRegex(workingText, rule);
-    if (!matches.length) return;
-
-    for (const match of matches) {
-      const title = JournalCreator._resolveTitle(match, rule);
-      const content = JournalCreator._applyTemplate(match, rule);
-      const htmlContent = JournalCreator._applyOutputFormat(content, rule.outputFormat);
-
-      if (rule.createsNewPage) {
-        const pageData = {
-          name: title,
-          type: "text",
-          text: { content: htmlContent, format: 1 },
-        };
-        if (parentCategory) pageData.category = parentCategory;
-        await journal.createEmbeddedDocuments("JournalEntryPage", [pageData]);
-      }
-
-      if (rule.children?.length) {
-        for (const child of rule.children) {
-          await JournalCreator._processChildRule(child, match[0], parentItems, pdfParser, parentRanges, journal, parentCategory);
-        }
-      }
-    }
-  }
-
-  // ── Regex helpers ─────────────────────────────────────────────────────────
-
-  static _runRegex(text, rule) {
-    if (!rule.pattern) return [];
-    let regex;
-    try {
-      regex = new RegExp(rule.pattern, rule.flags || "gi");
-    } catch (e) {
-      console.warn(`DAJB | Invalid regex in rule "${rule.name}":`, e.message);
-      return [];
-    }
-    const matches = [];
-    let m;
-    // If "g" flag present iterate; otherwise single match
-    if (regex.global || regex.sticky) {
-      while ((m = regex.exec(text)) !== null) {
-        matches.push(m);
-        if (!regex.global && !regex.sticky) break;
-      }
-    } else {
-      m = regex.exec(text);
-      if (m) matches.push(m);
-    }
-    return matches;
-  }
-
-  static _resolveTitle(match, rule) {
-    const cg = rule.captureGroup ?? 0;
-    return (cg > 0 ? match[cg] : match[0]) || "Untitled";
-  }
-
-  static _applyTemplate(match, rule) {
-    let tpl = rule.outputTemplate || "{{match}}";
-    tpl = tpl.replace(/\{\{match\}\}/g, match[0] ?? "");
-    // {{group1}}, {{group2}}, …
-    for (let i = 1; i < match.length; i++) {
-      tpl = tpl.replace(new RegExp(`\\{\\{group${i}\\}\\}`, "g"), match[i] ?? "");
-    }
-    return tpl;
-  }
-
-  static _applyOutputFormat(content, fmt) {
-    if (!fmt) return `<p>${content}</p>`;
-    let html = content;
-
-    if (fmt.headingLevel && fmt.headingLevel >= 1 && fmt.headingLevel <= 6) {
-      const h = fmt.headingLevel;
-      html = `<h${h}>${content}</h${h}>`;
-    } else if (fmt.asList) {
-      const tag = fmt.listType === "ol" ? "ol" : "ul";
-      html = `<${tag}><li>${content}</li></${tag}>`;
-    } else {
-      html = `<p>${content}</p>`;
-    }
-    return html;
+    return text;
   }
 
   // ── Foundry document helpers ──────────────────────────────────────────────
 
   static async _getOrCreateJournal(name) {
-    // Look for existing journal by name
-    let journal = game.journal.find((j) => j.name === name);
+    let journal = game.journal.find(j => j.name === name);
     if (!journal) {
       journal = await JournalEntry.create({
         name,
@@ -219,28 +160,18 @@ export class JournalCreator {
     return journal;
   }
 
-  /**
-   * Get or create a category on a journal (Foundry v13 feature).
-   * Returns the category id string or null if not supported.
-   */
   static async _getOrCreateCategory(journal, categoryName) {
     if (!categoryName) return null;
-
-    // v13 journals have a `categories` array in their system data
-    // Access via journal.system?.categories or journal.getFlag approach
-    // The v13 API uses journal.categories on the document
     try {
       const cats = journal.categories ?? journal.system?.categories ?? [];
-      const existing = cats.find((c) => c.name === categoryName);
+      const existing = cats.find(c => c.name === categoryName);
       if (existing) return existing.id ?? existing._id ?? existing.name;
 
-      // Create new category — v13 API
       if (typeof journal.createCategory === "function") {
         const cat = await journal.createCategory({ name: categoryName });
         return cat.id ?? cat._id ?? categoryName;
       }
 
-      // Fallback: update the journal document directly
       const existingCats = foundry.utils.deepClone(cats);
       const newCat = { id: foundry.utils.randomID(), name: categoryName };
       existingCats.push(newCat);

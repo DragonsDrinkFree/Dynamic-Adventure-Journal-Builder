@@ -169,4 +169,80 @@ export class RuleManager {
       })
       .filter((r) => !isNaN(r.start) && !isNaN(r.end));
   }
+
+  // ── Text splitting ─────────────────────────────────────────────────────────
+
+  /**
+   * Split `text` into sections based on `rule`'s pattern.
+   * Each regex match is a section boundary; the body is the text that follows it
+   * up to the next match (or end of text).
+   *
+   * Returns Array<{ match: RegExpMatchArray|null, title: string|null, body: string }>
+   * The first element may have match=null when text exists before the first match (preamble).
+   */
+  static splitOnPattern(text, rule) {
+    if (!text) return [];
+    if (!rule.pattern) return [{ match: null, title: null, body: text }];
+
+    let flags = rule.flags || 'g';
+    if (!flags.includes('g')) flags += 'g';
+
+    let regex;
+    try {
+      regex = new RegExp(rule.pattern, flags);
+    } catch (e) {
+      console.warn(`DAJB | Invalid regex in rule "${rule.name}":`, e.message);
+      return [{ match: null, title: null, body: text }];
+    }
+
+    const allMatches = [...text.matchAll(regex)];
+    if (!allMatches.length) return [{ match: null, title: null, body: text }];
+
+    const sections = [];
+    const cg = rule.captureGroup ?? 0;
+
+    // Preamble — text before the first match
+    if (allMatches[0].index > 0) {
+      const pre = text.slice(0, allMatches[0].index).trim();
+      if (pre) sections.push({ match: null, title: null, body: pre });
+    }
+
+    for (let i = 0; i < allMatches.length; i++) {
+      const m = allMatches[i];
+      const next = allMatches[i + 1];
+      const bodyStart = m.index + m[0].length;
+      const bodyEnd = next ? next.index : text.length;
+
+      sections.push({
+        match: m,
+        title: ((cg > 0 ? m[cg] : m[0]) ?? '').trim(),
+        body: text.slice(bodyStart, bodyEnd).trim(),
+      });
+    }
+
+    return sections;
+  }
+
+  /**
+   * Walk the rule tree and return the path [ancestor, ..., rule] for the given id.
+   * Returns [] if not found.
+   */
+  getPathToRule(id) {
+    const path = [];
+    const search = (rules, currentPath) => {
+      for (const rule of rules) {
+        const p = [...currentPath, rule];
+        if (rule.id === id) { path.push(...p); return true; }
+        if (rule.children?.length && search(rule.children, p)) return true;
+      }
+      return false;
+    };
+    search(this.rules, []);
+    return path;
+  }
+
+  /** Returns the top-level rule that contains the given rule id (or the rule itself). */
+  getTopLevelAncestor(id) {
+    return this.getPathToRule(id)[0] ?? null;
+  }
 }
