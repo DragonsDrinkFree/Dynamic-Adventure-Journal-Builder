@@ -29,6 +29,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       "select-rule":   function(ev, t) { BuilderApp._onSelectRule.call(this, ev, t); },
       "collapse-rule":    function(ev, t) { BuilderApp._onCollapseRule.call(this, ev, t); },
       "inspect-fonts":    function(ev, t) { BuilderApp._onInspectFonts.call(this, ev, t); },
+      "move-rule-up":     function(ev, t) { BuilderApp._onMoveRuleUp.call(this, ev, t); },
+      "move-rule-down":   function(ev, t) { BuilderApp._onMoveRuleDown.call(this, ev, t); },
     },
   };
 
@@ -114,14 +116,31 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     label.className = "dajb-rule-label";
     label.dataset.action = "select-rule";
     label.dataset.ruleId = rule.id;
-    if (rule.ruleType === "strip") {
+    const typeInfo = { "create-category": ["cat","#7ec8e3"], "create-page": ["page","#9ade9a"], "strip": ["strip","#e07878"] };
+    const ti = typeInfo[rule.ruleType];
+    if (ti) {
       const badge = document.createElement("span");
-      badge.className = "dajb-strip-badge";
-      badge.textContent = "strip";
+      badge.className = "dajb-type-badge";
+      badge.style.color = ti[1];
+      badge.style.borderColor = ti[1];
+      badge.textContent = ti[0];
       label.appendChild(badge);
     }
     label.appendChild(document.createTextNode(rule.name || "(unnamed)"));
     item.appendChild(label);
+
+    // Order buttons
+    const orderBtns = document.createElement("span");
+    orderBtns.className = "dajb-rule-order";
+    const btnUp = document.createElement("button");
+    btnUp.type = "button"; btnUp.textContent = "▲"; btnUp.title = "Move up";
+    btnUp.dataset.action = "move-rule-up"; btnUp.dataset.ruleId = rule.id;
+    const btnDown = document.createElement("button");
+    btnDown.type = "button"; btnDown.textContent = "▼"; btnDown.title = "Move down";
+    btnDown.dataset.action = "move-rule-down"; btnDown.dataset.ruleId = rule.id;
+    orderBtns.appendChild(btnUp);
+    orderBtns.appendChild(btnDown);
+    item.appendChild(orderBtns);
 
     const wrapper = document.createElement("div");
     wrapper.appendChild(item);
@@ -168,14 +187,70 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
   _buildEditorHTML(rule, isTopLevel) {
     const fmt = rule.outputFormat;
-    const isStrip = rule.ruleType === 'strip';
+    const type = rule.ruleType ?? 'create-section';
+    const isCat     = type === 'create-category';
+    const isPage    = type === 'create-page';
+    const isSection = type === 'create-section';
+    const isStrip   = type === 'strip';
+    const hasTargeting = !isCat;
+    const hasOutput    = isPage || isSection;
+
+    const headerClass = isCat ? 'category-header' : isStrip ? 'strip-header' : '';
+    const canHaveChildren = isPage || isSection;
+
+    const fontTargetingFields = `
+      <fieldset class="dajb-fieldset">
+        <legend>Font Targeting</legend>
+        <div class="dajb-field-row">
+          <label class="dajb-field">
+            <span>Min Size (pt)</span>
+            <input type="number" data-field="minFontSize" value="${rule.minFontSize ?? ""}" min="0" step="0.5" placeholder="Any" style="width:70px" />
+          </label>
+          <label class="dajb-field">
+            <span>Max Size (pt)</span>
+            <input type="number" data-field="maxFontSize" value="${rule.maxFontSize ?? ""}" min="0" step="0.5" placeholder="Any" style="width:70px" />
+          </label>
+        </div>
+        <label class="dajb-field">
+          <span>Font Name Contains</span>
+          <input type="text" data-field="fontNameContains" value="${this._esc(rule.fontNameContains ?? '')}" placeholder="e.g. Bold, Garamond" />
+        </label>
+        <label class="dajb-field">
+          <span>Font Color</span>
+          <div class="dajb-color-field">
+            ${rule.fontColor ? `<span class="dajb-color-swatch" style="background:${this._esc(rule.fontColor)}"></span>` : ''}
+            <input type="text" data-field="fontColor" value="${this._esc(rule.fontColor ?? '')}" placeholder="#rrggbb (from Inspector)" class="dajb-monospace" style="width:140px" />
+          </div>
+        </label>
+        <em class="dajb-hint">Font + regex = AND (both must match). Use the Fonts inspector to discover values.</em>
+      </fieldset>`;
+
+    const regexFields = `
+      <fieldset class="dajb-fieldset">
+        <legend>Regex Pattern</legend>
+        <label class="dajb-field">
+          <span>Pattern</span>
+          <input type="text" data-field="pattern" value="${this._esc(rule.pattern)}" placeholder="e.g. ^## (.+)$" class="dajb-monospace" />
+        </label>
+        <label class="dajb-field">
+          <span>Flags</span>
+          <input type="text" data-field="flags" value="${this._esc(rule.flags)}" placeholder="gi" style="width:60px" />
+        </label>
+        ${!isStrip ? `
+        <label class="dajb-field">
+          <span>Title Capture Group</span>
+          <input type="number" data-field="captureGroup" value="${rule.captureGroup ?? 0}" min="0" style="width:60px" />
+          <em class="dajb-hint">0 = full match</em>
+        </label>` : ""}
+      </fieldset>`;
+
     return `
       <div class="dajb-editor-form">
-        <div class="dajb-editor-header ${isStrip ? 'strip-header' : ''}">
-          <strong>${isTopLevel ? "Section Rule" : "Child Rule"}</strong>
+        <div class="dajb-editor-header ${headerClass}">
+          <strong>${isTopLevel ? "Top-Level Rule" : "Child Rule"}</strong>
           <div class="dajb-editor-actions">
-            ${!isStrip ? `<button type="button" data-action="add-child-rule" title="Add child rule">+ Child</button>` : ""}
-            <button type="button" data-action="delete-rule" class="dajb-btn-danger" title="Delete this rule">Delete</button>
+            ${canHaveChildren ? `<button type="button" data-action="add-child-rule" title="Add child rule">+ Child</button>` : ""}
+            <button type="button" data-action="delete-rule" class="dajb-btn-danger">Delete</button>
           </div>
         </div>
 
@@ -187,16 +262,19 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         <label class="dajb-field">
           <span>Rule Type</span>
           <select data-field="ruleType">
-            <option value="boundary" ${!isStrip ? "selected" : ""}>Boundary — splits text into sections</option>
-            <option value="strip"    ${ isStrip ? "selected" : ""}>Strip — removes matched text</option>
+            <option value="create-category" ${isCat     ? "selected" : ""}>Create Category — meta rule, no text processing</option>
+            <option value="create-page"     ${isPage    ? "selected" : ""}>Create Page — each match becomes a journal page</option>
+            <option value="create-section"  ${isSection ? "selected" : ""}>Create Section — each match becomes a heading</option>
+            <option value="strip"           ${isStrip   ? "selected" : ""}>Strip — removes matched text</option>
           </select>
         </label>
 
-        ${isTopLevel && !isStrip ? `
+        ${isTopLevel ? `
+        ${!isCat ? `
         <label class="dajb-field">
           <span>Page Ranges</span>
           <input type="text" data-field="pageRanges" value="${this._esc(rule.pageRanges)}" placeholder="e.g. 11-50, 61-70" />
-        </label>
+        </label>` : ""}
         <label class="dajb-field">
           <span>Target Journal</span>
           <input type="text" data-field="targetJournal" value="${this._esc(rule.targetJournal)}" placeholder="Journal name" />
@@ -205,84 +283,33 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
         ${!isStrip ? `
         <label class="dajb-field">
-          <span>Target Category</span>
-          <input type="text" data-field="targetCategory" value="${this._esc(rule.targetCategory)}" placeholder="Leave blank for none" />
+          <span>${isCat ? "Category Name" : "Target Category"}</span>
+          <input type="text" data-field="targetCategory" value="${this._esc(rule.targetCategory)}"
+            placeholder="${isCat ? "Name of category to create" : "Category to place items into"}" />
         </label>
-        <label class="dajb-field">
-          <span>Category Mode</span>
-          <select data-field="categoryMode">
-            <option value="static"  ${rule.categoryMode === "static"  ? "selected" : ""}>Static — one fixed category</option>
-            <option value="dynamic" ${rule.categoryMode === "dynamic" ? "selected" : ""}>Dynamic — one category per match</option>
-          </select>
-        </label>
+        ${isCat ? `<em class="dajb-hint" style="color:#7ec8e3;padding:0 4px 8px">Place this rule above any Create Page rules that use this category.</em>` : ""}
         ` : ""}
 
-        ${!isStrip ? `
-        <label class="dajb-field dajb-field-check">
-          <input type="checkbox" data-field="createsNewPage" ${rule.createsNewPage ? "checked" : ""} />
-          <span>Each match creates a new page</span>
-        </label>
-        ` : `<em class="dajb-hint dajb-strip-hint">Matched text is removed from the body before boundary rules run. Use font criteria, regex, or both (AND).</em>`}
+        ${isStrip ? `<em class="dajb-hint dajb-strip-hint">Matched text is removed before boundary rules run.</em>` : ""}
 
-        <fieldset class="dajb-fieldset">
-          <legend>Font Targeting</legend>
-          <div class="dajb-field-row">
-            <label class="dajb-field">
-              <span>Min Size (pt)</span>
-              <input type="number" data-field="minFontSize" value="${rule.minFontSize ?? ""}" min="0" step="0.5" placeholder="Any" style="width:70px" />
-            </label>
-            <label class="dajb-field">
-              <span>Max Size (pt)</span>
-              <input type="number" data-field="maxFontSize" value="${rule.maxFontSize ?? ""}" min="0" step="0.5" placeholder="Any" style="width:70px" />
-            </label>
-          </div>
-          <label class="dajb-field">
-            <span>Font Name Contains</span>
-            <input type="text" data-field="fontNameContains" value="${this._esc(rule.fontNameContains ?? '')}" placeholder="e.g. Bold, Garamond" />
-          </label>
-          <label class="dajb-field">
-            <span>Font Color</span>
-            <div class="dajb-color-field">
-              ${rule.fontColor ? `<span class="dajb-color-swatch" style="background:${this._esc(rule.fontColor)}"></span>` : ''}
-              <input type="text" data-field="fontColor" value="${this._esc(rule.fontColor ?? '')}" placeholder="#rrggbb (from Inspector)" class="dajb-monospace" style="width:140px" />
-            </div>
-          </label>
-          <em class="dajb-hint">Use the Fonts inspector to discover names and colors. Font + regex = AND (both must match).</em>
-        </fieldset>
+        ${hasTargeting ? fontTargetingFields : ""}
+        ${hasTargeting ? regexFields : ""}
 
-        <fieldset class="dajb-fieldset">
-          <legend>Regex Pattern</legend>
-          <label class="dajb-field">
-            <span>Pattern</span>
-            <input type="text" data-field="pattern" value="${this._esc(rule.pattern)}" placeholder="e.g. ^## (.+)$" class="dajb-monospace" />
-          </label>
-          <label class="dajb-field">
-            <span>Flags</span>
-            <input type="text" data-field="flags" value="${this._esc(rule.flags)}" placeholder="gi" style="width:60px" />
-          </label>
-          ${!isStrip ? `
-          <label class="dajb-field">
-            <span>Title Capture Group</span>
-            <input type="number" data-field="captureGroup" value="${rule.captureGroup ?? 0}" min="0" style="width:60px" />
-            <em class="dajb-hint">0 = full match</em>
-          </label>
-          ` : ""}
-        </fieldset>
-
-        ${!isStrip ? `
+        ${hasOutput ? `
         <fieldset class="dajb-fieldset">
           <legend>Output</legend>
           <label class="dajb-field">
             <span>Template</span>
-            <textarea data-field="outputTemplate" rows="3" class="dajb-monospace">${this._esc(rule.outputTemplate)}</textarea>
+            <textarea data-field="outputTemplate" rows="2" class="dajb-monospace">${this._esc(rule.outputTemplate)}</textarea>
           </label>
-          <em class="dajb-hint">Use {{match}}, {{group1}}, {{group2}}, …</em>
+          <em class="dajb-hint">{{match}}, {{group1}}, {{group2}}, …</em>
+          ${isSection ? `
           <label class="dajb-field">
             <span>Heading Level</span>
             <select data-field="outputFormat.headingLevel">
-              ${[0,1,2,3,4,5,6].map(n => `<option value="${n}" ${fmt.headingLevel === n ? "selected" : ""}>${n === 0 ? "None" : `H${n}`}</option>`).join("")}
+              ${[1,2,3,4,5,6].map(n => `<option value="${n}" ${fmt.headingLevel === n ? "selected" : ""}">H${n}</option>`).join("")}
             </select>
-          </label>
+          </label>` : ""}
           <label class="dajb-field dajb-field-check">
             <input type="checkbox" data-field="outputFormat.asList" ${fmt.asList ? "checked" : ""} />
             <span>Wrap in list</span>
@@ -588,6 +615,24 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     });
     this._renderEditor();
     this._renderPreview();
+  }
+
+  static _onMoveRuleUp(event, target) {
+    event.stopPropagation();
+    const ruleId = target.dataset.ruleId;
+    if (!ruleId) return;
+    this.ruleManager.moveRuleUp(ruleId);
+    this._renderRulesTree();
+    if (this._inspectingFonts) this._renderFontInspector(); else this._renderPreview();
+  }
+
+  static _onMoveRuleDown(event, target) {
+    event.stopPropagation();
+    const ruleId = target.dataset.ruleId;
+    if (!ruleId) return;
+    this.ruleManager.moveRuleDown(ruleId);
+    this._renderRulesTree();
+    if (this._inspectingFonts) this._renderFontInspector(); else this._renderPreview();
   }
 
   static _onCollapseRule(event, target) {

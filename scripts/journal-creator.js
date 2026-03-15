@@ -35,6 +35,18 @@ export class JournalCreator {
   // ── Top-level rule ────────────────────────────────────────────────────────
 
   static async _processTopRule(rule, ruleManager, pdfParser) {
+    // ── create-category: meta rule — just ensure the category exists ──────────
+    if (rule.ruleType === 'create-category') {
+      if (!rule.targetJournal && !rule.name) return;
+      const journal = await JournalCreator._getOrCreateJournal(rule.targetJournal || rule.name);
+      if (rule.targetCategory) {
+        await JournalCreator._ensureCategories(journal, [rule.targetCategory]);
+        console.log(`DAJB | Ensured category "${rule.targetCategory}" in "${journal.name}"`);
+      }
+      return;
+    }
+
+    // ── create-page / create-section: text-processing rules ──────────────────
     const ranges = ruleManager.parsePageRanges(rule.pageRanges);
     if (!ranges.length) {
       console.warn(`DAJB | Rule "${rule.name}" has no valid page ranges.`);
@@ -50,36 +62,29 @@ export class JournalCreator {
       return;
     }
 
+    if (rule.ruleType !== 'create-page') return; // create-section at top level has no-op
+
     const journal = await JournalCreator._getOrCreateJournal(rule.targetJournal || rule.name);
 
-    // Pre-create all categories in one batch before any pages are written.
-    // This prevents the race where a page is created before its category exists.
-    const categoryMap = new Map(); // catName → id
+    // Pre-create the target category once before writing any pages
+    const categoryMap = new Map();
     if (rule.targetCategory) {
-      const needed = rule.categoryMode === "dynamic"
-        ? namedSections.map(s => s.title)
-        : [rule.targetCategory];
-      await JournalCreator._ensureCategories(journal, needed, categoryMap);
+      await JournalCreator._ensureCategories(journal, [rule.targetCategory], categoryMap);
     }
 
     for (const section of namedSections) {
-      const catName = rule.targetCategory
-        ? (rule.categoryMode === "dynamic" ? section.title : rule.targetCategory)
-        : null;
-
       const bodyHTML = await JournalCreator._buildBodyHTML(
         section.body, section.bodyItems, rule.children, pdfParser, ranges, journal
       );
-
-      if (rule.createsNewPage) {
-        const pageData = {
-          name: section.title,
-          type: "text",
-          text: { content: bodyHTML, format: 1 },
-        };
-        if (catName && categoryMap.has(catName)) pageData.category = categoryMap.get(catName);
-        await journal.createEmbeddedDocuments("JournalEntryPage", [pageData]);
+      const pageData = {
+        name: section.title,
+        type: "text",
+        text: { content: bodyHTML, format: 1 },
+      };
+      if (rule.targetCategory && categoryMap.has(rule.targetCategory)) {
+        pageData.category = categoryMap.get(rule.targetCategory);
       }
+      await journal.createEmbeddedDocuments("JournalEntryPage", [pageData]);
     }
   }
 
@@ -104,31 +109,25 @@ export class JournalCreator {
     // Apply strip rules first, then find the primary boundary child
     const cleanedItems = RuleManager.stripContent(bodyItems ?? [], children);
 
-    const primaryChild = children?.find(c => c.ruleType !== 'strip' && (c.pattern || c.minFontSize != null || c.maxFontSize != null || c.fontNameContains || c.fontColor));
+    const primaryChild = children?.find(c =>
+      (c.ruleType === 'create-page' || c.ruleType === 'create-section') &&
+      (c.pattern || c.minFontSize != null || c.maxFontSize != null || c.fontNameContains || c.fontColor)
+    );
     if (!primaryChild) {
       const cleanedText = cleanedItems.length ? cleanedItems.map(i => i.text).join(' ').trim() : text;
       return cleanedText ? `<p>${cleanedText}</p>` : "";
     }
 
     const sections = RuleManager.splitOnCombinedTargeting(cleanedItems, primaryChild);
+    const namedSecs = sections.filter(s => s.match !== null);
 
-    // If this child rule creates pages, build them as journal pages (not inline HTML)
-    if (primaryChild.createsNewPage && journal) {
-      const namedSecs = sections.filter(s => s.match !== null);
-
-      // Pre-create all categories before writing pages
+    // create-page child: each match becomes its own journal page
+    if (primaryChild.ruleType === 'create-page' && journal) {
       const categoryMap = new Map();
       if (primaryChild.targetCategory) {
-        const needed = primaryChild.categoryMode === "dynamic"
-          ? namedSecs.map(s => s.title)
-          : [primaryChild.targetCategory];
-        await JournalCreator._ensureCategories(journal, needed, categoryMap);
+        await JournalCreator._ensureCategories(journal, [primaryChild.targetCategory], categoryMap);
       }
-
       for (const sec of namedSecs) {
-        const catName = primaryChild.targetCategory
-          ? (primaryChild.categoryMode === "dynamic" ? sec.title : primaryChild.targetCategory)
-          : null;
         const subHTML = await JournalCreator._buildBodyHTML(
           sec.body, sec.bodyItems, primaryChild.children, pdfParser, parentRanges, journal
         );
@@ -137,13 +136,15 @@ export class JournalCreator {
           type: "text",
           text: { content: subHTML || (sec.body ? `<p>${sec.body}</p>` : ""), format: 1 },
         };
-        if (catName && categoryMap.has(catName)) pageData.category = categoryMap.get(catName);
+        if (primaryChild.targetCategory && categoryMap.has(primaryChild.targetCategory)) {
+          pageData.category = categoryMap.get(primaryChild.targetCategory);
+        }
         await journal.createEmbeddedDocuments("JournalEntryPage", [pageData]);
       }
-      return ""; // parent page body gets nothing; child pages hold the content
+      return "";
     }
 
-    // Otherwise render as inline headings inside the parent page
+    // create-section child: each match becomes an inline heading
     let html = "";
     for (const sec of sections) {
       if (sec.match === null) {
@@ -151,13 +152,11 @@ export class JournalCreator {
         continue;
       }
       const level = primaryChild.outputFormat?.headingLevel || 3;
-      const titleHTML = `<h${level}>${sec.title}</h${level}>`;
       const subBody = await JournalCreator._buildBodyHTML(
         sec.body, sec.bodyItems, primaryChild.children, pdfParser, parentRanges, journal
       );
-      html += titleHTML + (subBody || (sec.body ? `<p>${sec.body}</p>` : ""));
+      html += `<h${level}>${sec.title}</h${level}>` + (subBody || (sec.body ? `<p>${sec.body}</p>` : ""));
     }
-
     return html || (text ? `<p>${text}</p>` : "");
   }
 
@@ -212,25 +211,32 @@ export class JournalCreator {
     const unique = [...new Set(names.filter(Boolean))];
     if (!unique.length) return outMap;
     try {
-      // Re-read live categories from the document each time
-      const cats = foundry.utils.deepClone(
-        journal.categories ?? journal.system?.categories ?? []
-      );
+      // v13: categories live at journal.categories (a Collection), keyed by _id.
+      // Convert to a plain array of plain objects we can serialise back.
+      const raw = journal.categories ?? [];
+      const existing = (typeof raw.values === 'function' ? [...raw.values()] : [...raw])
+        .map(c => ({ _id: c._id ?? c.id, name: c.name, sort: c.sort ?? 100000, flags: c.flags ?? {} }));
+
       const toAdd = [];
       for (const name of unique) {
-        const existing = cats.find(c => c.name === name);
-        if (existing) {
-          outMap.set(name, existing.id ?? existing._id ?? name);
+        const found = existing.find(c => c.name === name);
+        if (found) {
+          outMap.set(name, found._id);
         } else {
-          const newCat = { id: foundry.utils.randomID(), name };
-          cats.push(newCat);
+          const newCat = {
+            _id: foundry.utils.randomID(),
+            name,
+            sort: (existing.length + toAdd.length + 1) * 100000,
+            flags: {},
+          };
           toAdd.push(newCat);
-          outMap.set(name, newCat.id);
+          outMap.set(name, newCat._id);
         }
       }
+
       if (toAdd.length) {
-        // One update — all new categories land in the journal simultaneously
-        await journal.update({ "system.categories": cats });
+        // Single update — root-level "categories" array, not system.categories
+        await journal.update({ categories: [...existing, ...toAdd] });
       }
     } catch (e) {
       console.warn("DAJB | Could not ensure categories:", e.message);

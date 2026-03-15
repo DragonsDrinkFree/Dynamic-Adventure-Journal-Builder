@@ -440,24 +440,45 @@
   opacity: 0.7;
 }
 
-/* Strip rule badges in the rules tree */
-.dajb-strip-badge {
+/* Rule-type badges in the rules tree */
+.dajb-type-badge {
   display: inline-block;
   font-size: 9px;
   font-weight: bold;
-  color: #e07878;
-  background: rgba(224, 120, 120, 0.15);
-  border: 1px solid rgba(224, 120, 120, 0.4);
+  background: rgba(255,255,255,0.06);
+  border: 1px solid currentColor;
   border-radius: 3px;
   padding: 0 4px;
   margin-right: 5px;
   text-transform: uppercase;
   vertical-align: middle;
   line-height: 14px;
+  opacity: 0.85;
 }
 
-/* Strip rule editor header tint */
-.dajb-editor-header.strip-header { border-bottom-color: rgba(224, 120, 120, 0.4); }
+/* Up/down order buttons */
+.dajb-rule-order {
+  margin-left: auto;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.dajb-rule-item:hover .dajb-rule-order { opacity: 1; }
+.dajb-rule-order button {
+  background: none;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  font-size: 9px;
+  padding: 0 3px;
+  line-height: 1;
+}
+.dajb-rule-order button:hover { color: #fff; }
+
+/* Editor header tints per rule type */
+.dajb-editor-header.strip-header    { border-bottom-color: rgba(224, 120, 120, 0.4); }
+.dajb-editor-header.category-header { border-bottom-color: rgba(126, 200, 227, 0.4); }
 .dajb-strip-hint { color: #e07878 !important; }
 
 .dajb-preview-body-text {

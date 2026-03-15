@@ -13,14 +13,14 @@ export class RuleManager {
     return {
       id: foundry.utils.randomID(),
       name: "New Rule",
-      ruleType: "boundary",   // "boundary" | "strip"
+      // "create-category" | "create-page" | "create-section" | "strip"
+      ruleType: "create-section",
       // top-level only
       pageRanges: "",
       targetJournal: "",
-      targetCategory: "",
-      categoryMode: "static",
       // shared
-      createsNewPage: true,
+      targetCategory: "",   // category to create (create-category) or place content into (create-page)
+      // targeting
       pattern: "",
       flags: "gi",
       captureGroup: 0,
@@ -28,9 +28,10 @@ export class RuleManager {
       maxFontSize: null,
       fontNameContains: "",
       fontColor: "",
+      // output
       outputTemplate: "{{match}}",
       outputFormat: {
-        headingLevel: 0,
+        headingLevel: 2,
         asList: false,
         listType: "ul",
       },
@@ -122,6 +123,31 @@ export class RuleManager {
     } else {
       container.splice(index, 0, target);
     }
+  }
+
+  /** Returns [containerArray, index] for the rule, or [null, -1] if not found. */
+  _getContainer(id) {
+    const topIdx = this.rules.findIndex(r => r.id === id);
+    if (topIdx !== -1) return [this.rules, topIdx];
+    let result = [null, -1];
+    this._walk(this.rules, (rule) => {
+      if (result[0]) return;
+      const idx = rule.children?.findIndex(c => c.id === id) ?? -1;
+      if (idx !== -1) result = [rule.children, idx];
+    });
+    return result;
+  }
+
+  moveRuleUp(id) {
+    const [container, idx] = this._getContainer(id);
+    if (!container || idx <= 0) return;
+    [container[idx - 1], container[idx]] = [container[idx], container[idx - 1]];
+  }
+
+  moveRuleDown(id) {
+    const [container, idx] = this._getContainer(id);
+    if (!container || idx === -1 || idx >= container.length - 1) return;
+    [container[idx], container[idx + 1]] = [container[idx + 1], container[idx]];
   }
 
   getRuleById(id) {
