@@ -71,6 +71,7 @@ export class PDFParser {
    */
   async loadPDF(file) {
     const pdfjsLib = await getPdfjsLib();
+    this._pdfjsLib = pdfjsLib; // retain for OPS constant access in _extractColorSequence
 
     const arrayBuffer = await file.arrayBuffer();
     const typedArray = new Uint8Array(arrayBuffer);
@@ -130,17 +131,105 @@ export class PDFParser {
     if (this._itemCache.has(pageNum)) return this._itemCache.get(pageNum);
 
     const page = await this._doc.getPage(pageNum);
-    const content = await page.getTextContent();
+    const [content, opList] = await Promise.all([
+      page.getTextContent(),
+      page.getOperatorList().catch(() => null),
+    ]);
+
+    // Extract per-show-text fill color from the operator list.
+    // Each entry in colorSeq corresponds to one showText-type op (in order).
+    const colorSeq = opList ? PDFParser._extractColorSequence(opList, this._pdfjsLib) : [];
+
+    // content.items may include whitespace-only entries that have no matching
+    // showText op (PDF.js can synthesise them).  Assign colors by walking both
+    // arrays in tandem: only advance the color index for items that actually
+    // map to a showText op (i.e. non-empty strings).
+    let colorIdx = 0;
     const items = content.items
-      .filter((item) => item.str && item.str.trim())
-      .map((item) => ({
-        text: item.str,
-        fontSize: Math.abs(item.transform?.[3] ?? 0),
-        fontName: item.fontName ?? "",
-        color: PDFParser._colorToHex(item.color),
-      }));
+      .map((item) => {
+        const fontName = item.fontName ?? "";
+        const fn = fontName.toLowerCase();
+        const hasText = typeof item.str === 'string' && item.str.trim();
+        const color = hasText ? (colorSeq[colorIdx++] ?? '#000000') : '#000000';
+        return { _keep: !!hasText, text: item.str, fontSize: Math.abs(item.transform?.[3] ?? 0),
+          fontName, color,
+          isBold:   /bold|heavy|black|demi|semibold|extrabold|ultrabold/.test(fn),
+          isItalic: /italic|oblique|slanted|inclined/.test(fn),
+        };
+      })
+      .filter(item => item._keep)
+      .map(({ _keep, ...rest }) => rest);
+
     this._itemCache.set(pageNum, items);
     return items;
+  }
+
+  /**
+   * Walk a PDF.js operator list and return one hex color string per "show text"
+   * operation, reflecting the fill color that was active at that point.
+   * Handles RGB, gray, CMYK, and generic setFillColor ops.
+   * @param {Object} opList  — result of page.getOperatorList()
+   * @returns {string[]}
+   */
+  static _extractColorSequence(opList, pdfjsLib = null) {
+    // PDF.js OPS constants — prefer the live lib passed in, then window fallback,
+    // then hardcoded values for PDF.js 3.x (used when loaded as ES module).
+    const lib = pdfjsLib ?? window.pdfjsLib;
+    const OPS = lib?.OPS ?? {
+      setFillGray: 78, setFillRGBColor: 80, setFillCMYKColor: 82,
+      setFillColorSpace: 83, setFillColor: 84, setFillColorN: 85,
+      showText: 49, showSpacedText: 50,
+      nextLineShowText: 51, nextLineSetSpacingShowText: 52,
+    };
+
+    const toHex = (r, g, b) =>
+      '#' + [r, g, b]
+        .map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0'))
+        .join('');
+
+    const colors = [];
+    let r = 0, g = 0, b = 0; // default: black
+
+    for (let i = 0; i < opList.fnArray.length; i++) {
+      const fn   = opList.fnArray[i];
+      const args = opList.argsArray[i];
+
+      if (fn === OPS.setFillRGBColor) {
+        // rg — DeviceRGB: 3 × [0–1]
+        r = args[0] * 255; g = args[1] * 255; b = args[2] * 255;
+      } else if (fn === OPS.setFillGray) {
+        // g — DeviceGray: 1 × [0–1]
+        r = g = b = args[0] * 255;
+      } else if (fn === OPS.setFillCMYKColor) {
+        // k — DeviceCMYK: 4 × [0–1]
+        const [c, m, y, k] = args;
+        r = (1 - c) * (1 - k) * 255;
+        g = (1 - m) * (1 - k) * 255;
+        b = (1 - y) * (1 - k) * 255;
+      } else if (fn === OPS.setFillColor || fn === OPS.setFillColorN) {
+        // sc / scn — color values depend on current colorspace.
+        // Infer from arg count: 4 = CMYK, 3 = RGB, 1 = gray/spot-tint.
+        // This covers the common InDesign/Illustrator CMYK-exported PDF case.
+        if (args?.length === 4) {
+          const [c, m, y, k] = args;
+          r = (1 - c) * (1 - k) * 255;
+          g = (1 - m) * (1 - k) * 255;
+          b = (1 - y) * (1 - k) * 255;
+        } else if (args?.length === 3) {
+          r = args[0] * 255; g = args[1] * 255; b = args[2] * 255;
+        } else if (args?.length === 1) {
+          // Single-channel: gray or spot-color tint — treat as gray shade
+          r = g = b = args[0] * 255;
+        }
+      } else if (
+        fn === OPS.showText || fn === OPS.showSpacedText ||
+        fn === OPS.nextLineShowText || fn === OPS.nextLineSetSpacingShowText
+      ) {
+        colors.push(toHex(r, g, b));
+      }
+    }
+
+    return colors;
   }
 
   /**
@@ -157,19 +246,6 @@ export class PDFParser {
       }
     }
     return all;
-  }
-
-  /**
-   * Convert a PDF.js color array [r, g, b] (0–255) to a lowercase hex string.
-   * Returns "#000000" if color data is unavailable (older PDF.js builds).
-   * @param {Array|Uint8ClampedArray|undefined} color
-   * @returns {string}
-   */
-  static _colorToHex(color) {
-    if (!color || color.length < 3) return "#000000";
-    return "#" + Array.from(color).slice(0, 3)
-      .map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0"))
-      .join("");
   }
 
   /**
@@ -195,6 +271,11 @@ export class PDFParser {
    */
   static filterByCriteria(items, rule) {
     return items.filter((item) => {
+      if (rule.fontSize != null) {
+        const rounded = Math.round(item.fontSize * 2) / 2;
+        if (rounded !== rule.fontSize) return false;
+      }
+      // Legacy min/max fields (from old saved rule files)
       if (rule.minFontSize != null && item.fontSize < rule.minFontSize) return false;
       if (rule.maxFontSize != null && item.fontSize > rule.maxFontSize) return false;
       if (rule.fontNameContains &&
@@ -216,7 +297,15 @@ export class PDFParser {
       const size = Math.round(item.fontSize * 2) / 2; // round to nearest 0.5 pt
       const key = `${item.fontName}||${size}||${item.color ?? '#000000'}`;
       if (!map.has(key)) {
-        map.set(key, { fontName: item.fontName || '', fontSize: size, color: item.color ?? '#000000', count: 0, sample: '' });
+        map.set(key, {
+          fontName: item.fontName || '',
+          fontSize: size,
+          color: item.color ?? '#000000',
+          isBold:   item.isBold   ?? false,
+          isItalic: item.isItalic ?? false,
+          count: 0,
+          sample: '',
+        });
       }
       const entry = map.get(key);
       entry.count++;
@@ -227,10 +316,40 @@ export class PDFParser {
 
   /**
    * Join an items array into a plain text string.
-   * @param {Array<{text:string}>} items
-   * @returns {string}
    */
   static itemsToText(items) {
     return items.map((i) => i.text).join(" ");
+  }
+
+  /**
+   * Render an items array as HTML, wrapping consecutive runs of bold/italic items
+   * in <strong> and/or <em> tags.  Underline is not detectable from PDF text items.
+   * @param {Array} items
+   * @returns {string}
+   */
+  static itemsToHTML(items) {
+    if (!items?.length) return '';
+    const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    // Group consecutive items that share the same bold/italic state
+    const groups = [];
+    for (const item of items) {
+      const b = item.isBold   ?? false;
+      const i = item.isItalic ?? false;
+      const last = groups[groups.length - 1];
+      if (last && last.b === b && last.i === i) {
+        last.parts.push(item.text);
+      } else {
+        groups.push({ b, i, parts: [item.text] });
+      }
+    }
+
+    return groups.map(g => {
+      const text = esc(g.parts.join(' '));
+      if (g.b && g.i) return `<strong><em>${text}</em></strong>`;
+      if (g.b)        return `<strong>${text}</strong>`;
+      if (g.i)        return `<em>${text}</em>`;
+      return text;
+    }).join(' ');
   }
 }

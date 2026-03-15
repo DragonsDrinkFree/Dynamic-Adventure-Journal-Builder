@@ -51,6 +51,9 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     this._pdfFileName = null;
     this._collapsedIds = new Set();
     this._inspectingFonts = false;
+    this._selectionToolbar = null;
+    this._selectionChangeBound = null;
+    this._selectionDebounce = null;
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -69,6 +72,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     this._renderRulesTree();
     this._renderEditor();
     this._renderPreview();
+    this._setupSelectionListener();
   }
 
   // ── Rules Tree ────────────────────────────────────────────────────────────
@@ -201,16 +205,10 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     const fontTargetingFields = `
       <fieldset class="dajb-fieldset">
         <legend>Font Targeting</legend>
-        <div class="dajb-field-row">
-          <label class="dajb-field">
-            <span>Min Size (pt)</span>
-            <input type="number" data-field="minFontSize" value="${rule.minFontSize ?? ""}" min="0" step="0.5" placeholder="Any" style="width:70px" />
-          </label>
-          <label class="dajb-field">
-            <span>Max Size (pt)</span>
-            <input type="number" data-field="maxFontSize" value="${rule.maxFontSize ?? ""}" min="0" step="0.5" placeholder="Any" style="width:70px" />
-          </label>
-        </div>
+        <label class="dajb-field">
+          <span>Font Size (pt)</span>
+          <input type="number" data-field="fontSize" value="${rule.fontSize ?? ""}" min="0" step="0.5" placeholder="Any" style="width:80px" />
+        </label>
         <label class="dajb-field">
           <span>Font Name Contains</span>
           <input type="text" data-field="fontNameContains" value="${this._esc(rule.fontNameContains ?? '')}" placeholder="e.g. Bold, Garamond" />
@@ -303,6 +301,11 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             <textarea data-field="outputTemplate" rows="2" class="dajb-monospace">${this._esc(rule.outputTemplate)}</textarea>
           </label>
           <em class="dajb-hint">{{match}}, {{group1}}, {{group2}}, …</em>
+          <label class="dajb-field dajb-field-check">
+            <input type="checkbox" data-field="preserveFormatting" ${rule.preserveFormatting ? "checked" : ""} />
+            <span>Preserve bold / italic from PDF</span>
+          </label>
+          <em class="dajb-hint">Detected from font name (e.g. "Bold", "Italic"). Underline is not available from PDF text data.</em>
           ${isSection ? `
           <label class="dajb-field">
             <span>Heading Level</span>
@@ -335,8 +338,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     if (el.type === "checkbox") {
       value = el.checked;
     } else if (el.type === "number") {
-      // minFontSize / maxFontSize are nullable — empty string means "no filter"
-      const nullable = field === "minFontSize" || field === "maxFontSize";
+      // fontSize is nullable — empty string means "no filter"
+      const nullable = field === "fontSize";
       value = (nullable && el.value === "") ? null : Number(el.value);
     } else if (el.tagName === "SELECT" && field === "outputFormat.headingLevel") {
       value = Number(el.value);
@@ -372,7 +375,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     }
 
     // Refresh preview (or keep inspector open) on targeting-related changes
-    if (["pattern", "flags", "pageRanges", "captureGroup", "minFontSize", "maxFontSize", "fontNameContains", "fontColor"].includes(field)) {
+    if (["pattern", "flags", "pageRanges", "captureGroup", "fontSize", "fontNameContains", "fontColor"].includes(field)) {
       if (this._inspectingFonts) {
         this._renderFontInspector();
       } else {
@@ -399,6 +402,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     const topRule = this.ruleManager.getTopLevelAncestor(this.selectedRuleId);
     if (!topRule) return;
 
+    this._dismissSelectionToolbar();
+    window.getSelection()?.removeAllRanges();
     container.innerHTML = '<div class="dajb-preview-empty">Building preview…</div>';
 
     try {
@@ -452,19 +457,55 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     const el = document.createElement("div");
 
     if (sec.match === null) {
-      // Preamble text — shown greyed out
+      // Preamble text — shown greyed out, rendered as item spans for selectability
       el.className = "dajb-preview-preamble";
-      const preview = sec.body.slice(0, MAX_BODY);
-      el.textContent = preview + (sec.body.length > MAX_BODY ? "…" : "");
+      if (sec.bodyItems?.length) {
+        const limit = 150;
+        for (const item of sec.bodyItems.slice(0, limit)) {
+          const span = document.createElement("span");
+          span.className = "dajb-preview-item";
+          span.textContent = item.text;
+          span.dataset.fontSize = item.fontSize;
+          span.dataset.fontName = item.fontName;
+          span.dataset.color    = item.color;
+          span.dataset.isBold   = item.isBold;
+          span.dataset.isItalic = item.isItalic;
+          el.appendChild(span);
+          el.appendChild(document.createTextNode(" "));
+        }
+        if (sec.bodyItems.length > limit) {
+          const more = document.createElement("span");
+          more.className = "dajb-preview-more-inline";
+          more.textContent = `… (${sec.bodyItems.length - limit} more)`;
+          el.appendChild(more);
+        }
+      } else {
+        el.textContent = sec.body.slice(0, MAX_BODY) + (sec.body.length > MAX_BODY ? "…" : "");
+      }
       return el;
     }
 
     el.className = `dajb-preview-section depth-${depth}${isActiveLevel ? " active-rule" : ""}`;
 
-    // Section title
+    // Section title — render as selectable item spans when underlying items are available
     const titleEl = document.createElement("div");
     titleEl.className = "dajb-preview-section-title";
-    titleEl.textContent = sec.title;
+    if (sec.titleItems?.length) {
+      for (const item of sec.titleItems) {
+        const span = document.createElement("span");
+        span.className = "dajb-preview-item";
+        span.textContent = item.text;
+        span.dataset.fontSize = item.fontSize;
+        span.dataset.fontName = item.fontName;
+        span.dataset.color    = item.color;
+        span.dataset.isBold   = item.isBold;
+        span.dataset.isItalic = item.isItalic;
+        titleEl.appendChild(span);
+        titleEl.appendChild(document.createTextNode(" "));
+      }
+    } else {
+      titleEl.textContent = sec.title;
+    }
     el.appendChild(titleEl);
 
     if (sec.bodyItems?.length || sec.body) {
@@ -480,18 +521,36 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       }
 
       // 2. Find first boundary child and split the (now stripped) body
-      const childRule = rule.children?.find(c => c.ruleType !== 'strip' && (c.pattern || c.minFontSize != null || c.maxFontSize != null || c.fontNameContains || c.fontColor));
+      const childRule = rule.children?.find(c => c.ruleType !== 'strip' && (c.pattern || c.fontSize != null || c.fontNameContains || c.fontColor));
       if (childRule) {
         const childSections = RuleManager.splitOnCombinedTargeting(strippedItems, childRule);
         for (const childSec of childSections) {
           el.appendChild(this._buildSectionEl(childSec, childRule, depth + 1));
         }
       } else {
-        const bodyText = strippedItems.map(i => i.text).join(' ').trim() || sec.body;
         const bodyEl = document.createElement("div");
         bodyEl.className = "dajb-preview-body-text";
-        const preview = bodyText.slice(0, MAX_BODY);
-        bodyEl.textContent = preview + (bodyText.length > MAX_BODY ? "…" : "");
+        // Render each item as a selectable span carrying PDF metadata
+        const limit = 200;
+        const shown = strippedItems.slice(0, limit);
+        for (const item of shown) {
+          const span = document.createElement("span");
+          span.className = "dajb-preview-item";
+          span.textContent = item.text;
+          span.dataset.fontSize  = item.fontSize;
+          span.dataset.fontName  = item.fontName;
+          span.dataset.color     = item.color;
+          span.dataset.isBold    = item.isBold;
+          span.dataset.isItalic  = item.isItalic;
+          bodyEl.appendChild(span);
+          bodyEl.appendChild(document.createTextNode(" "));
+        }
+        if (strippedItems.length > limit) {
+          const more = document.createElement("span");
+          more.className = "dajb-preview-more-inline";
+          more.textContent = `… (${strippedItems.length - limit} more items)`;
+          bodyEl.appendChild(more);
+        }
         el.appendChild(bodyEl);
       }
     }
@@ -501,7 +560,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
   /** Get text for a rule, applying font criteria as a pre-filter when paired with a regex. */
   async _getTextForRule(rule, ranges) {
-    const hasFontFilter = rule.minFontSize != null || rule.maxFontSize != null || rule.fontNameContains;
+    const hasFontFilter = rule.fontSize != null || rule.fontNameContains;
     if (hasFontFilter) {
       const items = await this.pdfParser.getPagesItems(ranges);
       const filtered = PDFParser.filterByCriteria(items, rule);
@@ -698,7 +757,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       const table = document.createElement('table');
       table.className = 'dajb-font-table';
       table.innerHTML = `<thead><tr>
-        <th></th><th>Font Name</th><th>Size (pt)</th><th>Color</th><th>Count</th><th>Sample Text</th>
+        <th></th><th>Font Name</th><th>Size (pt)</th><th>B/I</th><th>Color</th><th>Count</th><th>Sample Text</th>
       </tr></thead>`;
 
       const canApply = !!this.selectedRuleId;
@@ -711,6 +770,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           </td>
           <td class="dajb-monospace dajb-font-name">${this._esc(row.fontName || '(unknown)')}</td>
           <td class="dajb-font-size">${row.fontSize}</td>
+          <td class="dajb-font-bi">${row.isBold ? '<strong>B</strong>' : ''}${row.isItalic ? '<em>I</em>' : ''}</td>
           <td class="dajb-font-color">
             <span class="dajb-color-swatch" style="background:${this._esc(row.color)}"></span>
             <span class="dajb-monospace">${this._esc(row.color)}</span>
@@ -723,8 +783,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             this.ruleManager.updateRule(this.selectedRuleId, {
               fontNameContains: row.fontName,
               fontColor: row.color !== '#000000' ? row.color : '',
-              minFontSize: row.fontSize,
-              maxFontSize: row.fontSize,
+              fontSize: row.fontSize,
             });
             this._renderEditor();
             this._renderFontInspector();
@@ -741,6 +800,133 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       container.innerHTML = `<div class="dajb-preview-empty">Error: ${err.message}</div>`;
       console.error('DAJB font inspector error', err);
     }
+  }
+
+  // ── Preview text selection → create rule ─────────────────────────────────
+
+  _setupSelectionListener() {
+    if (this._selectionChangeBound) document.removeEventListener("selectionchange", this._selectionChangeBound);
+    this._selectionChangeBound = () => this._onSelectionChange();
+    document.addEventListener("selectionchange", this._selectionChangeBound);
+  }
+
+  _onSelectionChange() {
+    clearTimeout(this._selectionDebounce);
+    const sel = window.getSelection();
+
+    // Collapsed or empty — hide toolbar
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+      this._dismissSelectionToolbar();
+      return;
+    }
+
+    // Debounce: only process once the user stops dragging
+    this._selectionDebounce = setTimeout(() => {
+      const sel2 = window.getSelection();
+      if (!sel2 || sel2.isCollapsed || sel2.rangeCount === 0) return;
+
+      const preview = this.element?.querySelector("#dajb-preview-content");
+      if (!preview) return;
+
+      // Ignore selections outside our preview
+      if (!preview.contains(sel2.anchorNode) && !preview.contains(sel2.focusNode)) return;
+
+      const range = sel2.getRangeAt(0);
+      const spans = preview.querySelectorAll(".dajb-preview-item");
+      const covered = [];
+      for (const span of spans) {
+        try { if (range.intersectsNode(span)) covered.push(span); } catch (_) {}
+      }
+      if (!covered.length) return;
+
+      // Position the toolbar at the bottom-right of the selection range
+      const rect = range.getBoundingClientRect();
+      this._showSelectionToolbar(covered, rect.right, rect.bottom + 6);
+    }, 250);
+  }
+
+  _showSelectionToolbar(spans, clientX, clientY) {
+    this._dismissSelectionToolbar();
+
+    // Aggregate: most-frequent value per attribute
+    const freq = (arr) => {
+      const counts = {};
+      for (const v of arr) counts[v] = (counts[v] || 0) + 1;
+      return Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
+    };
+    const fontName  = freq(spans.map(s => s.dataset.fontName));
+    const fontSize  = parseFloat(freq(spans.map(s => s.dataset.fontSize))) || null;
+    const color     = freq(spans.map(s => s.dataset.color));
+    const sampleText = spans.map(s => s.textContent).join(" ").slice(0, 60);
+
+    const bar = document.createElement("div");
+    bar.className = "dajb-selection-toolbar";
+    bar.style.left = `${clientX}px`;
+    bar.style.top  = `${clientY + 12}px`;
+
+    const colorDot = color && color !== "#000000"
+      ? `<span class="dajb-color-swatch" style="background:${color};flex-shrink:0"></span>` : "";
+    bar.innerHTML = `
+      <div class="dajb-sel-info">
+        ${colorDot}
+        <span class="dajb-sel-sample">"${this._esc(sampleText)}"</span>
+        <span class="dajb-sel-attrs">${fontSize ? fontSize + "pt" : ""}${fontName ? " · " + fontName : ""}${color !== "#000000" ? " · " + color : ""}</span>
+      </div>
+      <button type="button" class="dajb-btn dajb-sel-create-btn" title="Create a new rule targeting this text's font/size/color">+ Create Rule</button>
+      <button type="button" class="dajb-icon-btn dajb-sel-dismiss-btn" title="Dismiss">×</button>
+    `;
+
+    bar.querySelector(".dajb-sel-create-btn").addEventListener("click", () => {
+      this._createRuleFromSelection({ fontName, fontSize, color });
+      this._dismissSelectionToolbar();
+      window.getSelection()?.removeAllRanges();
+    });
+    bar.querySelector(".dajb-sel-dismiss-btn").addEventListener("click", () => {
+      this._dismissSelectionToolbar();
+      window.getSelection()?.removeAllRanges();
+    });
+
+    document.body.appendChild(bar);
+    this._selectionToolbar = bar;
+
+    // Clamp to viewport
+    const rect = bar.getBoundingClientRect();
+    if (rect.right > window.innerWidth - 8)  bar.style.left = `${window.innerWidth - rect.width - 8}px`;
+    if (rect.bottom > window.innerHeight - 8) bar.style.top = `${clientY - rect.height - 8}px`;
+  }
+
+  _dismissSelectionToolbar() {
+    if (this._selectionToolbar) {
+      this._selectionToolbar.remove();
+      this._selectionToolbar = null;
+    }
+  }
+
+  _createRuleFromSelection({ fontName, fontSize, color }) {
+    const overrides = {};
+    if (fontName)              overrides.fontNameContains = fontName;
+    if (fontSize != null)      overrides.fontSize = fontSize;
+    if (color && color !== "#000000" && color !== "#ffffff") overrides.fontColor = color;
+
+    let rule;
+    if (this.selectedRuleId) {
+      const parent = this.ruleManager.getRuleById(this.selectedRuleId);
+      if (parent && (parent.ruleType === "create-page" || parent.ruleType === "create-section")) {
+        // Create child under selected rule
+        rule = this.ruleManager.createRule(this.selectedRuleId);
+      } else {
+        rule = this.ruleManager.createRule(null);
+      }
+    } else {
+      rule = this.ruleManager.createRule(null);
+    }
+
+    this.ruleManager.updateRule(rule.id, { name: "New rule from selection", ruleType: "create-section", ...overrides });
+    this.selectedRuleId = rule.id;
+    this._renderRulesTree();
+    this._renderEditor();
+    this._renderPreview();
+    ui.notifications?.info("DAJB | Rule created from selection — adjust type and pattern as needed.");
   }
 
   // ── Utility ───────────────────────────────────────────────────────────────

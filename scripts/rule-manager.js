@@ -24,12 +24,12 @@ export class RuleManager {
       pattern: "",
       flags: "gi",
       captureGroup: 0,
-      minFontSize: null,
-      maxFontSize: null,
+      fontSize: null,
       fontNameContains: "",
       fontColor: "",
       // output
       outputTemplate: "{{match}}",
+      preserveFormatting: false,
       outputFormat: {
         headingLevel: 2,
         asList: false,
@@ -178,6 +178,14 @@ export class RuleManager {
     if (!Array.isArray(data.rules))
       throw new Error('JSON must have a top-level "rules" array');
     this.rules = data.rules;
+    // Migrate old minFontSize/maxFontSize schema to exact fontSize
+    this._walk(this.rules, (rule) => {
+      if (rule.fontSize === undefined && (rule.minFontSize != null || rule.maxFontSize != null)) {
+        rule.fontSize = rule.minFontSize ?? rule.maxFontSize;
+      }
+      delete rule.minFontSize;
+      delete rule.maxFontSize;
+    });
   }
 
   // ── Page-range parser ─────────────────────────────────────────────────────
@@ -258,13 +266,16 @@ export class RuleManager {
    */
   static hasFontTargeting(rule) {
     if (!rule || rule.pattern) return false;
-    return rule.minFontSize != null || rule.maxFontSize != null || !!rule.fontNameContains || !!rule.fontColor;
+    return rule.fontSize != null || !!rule.fontNameContains || !!rule.fontColor;
   }
 
   /** Test whether a single PDF text item satisfies this rule's font criteria. */
   static _matchesFontCriteria(item, rule) {
-    if (rule.minFontSize != null && item.fontSize < rule.minFontSize) return false;
-    if (rule.maxFontSize != null && item.fontSize > rule.maxFontSize) return false;
+    if (rule.fontSize != null) {
+      // Round both to nearest 0.5pt so floating-point PDF matrix values match
+      const rounded = Math.round(item.fontSize * 2) / 2;
+      if (rounded !== rule.fontSize) return false;
+    }
     if (rule.fontNameContains &&
         !item.fontName?.toLowerCase().includes(rule.fontNameContains.toLowerCase())) return false;
     if (rule.fontColor && item.color !== rule.fontColor.toLowerCase()) return false;
@@ -340,7 +351,7 @@ export class RuleManager {
   static splitOnCombinedTargeting(items, rule) {
     if (!items?.length) return [];
 
-    const hasFontCriteria = rule.minFontSize != null || rule.maxFontSize != null ||
+    const hasFontCriteria = rule.fontSize != null ||
                             !!rule.fontNameContains || !!rule.fontColor;
     const hasPattern = !!rule.pattern;
 
@@ -368,40 +379,39 @@ export class RuleManager {
     const boundaries = [];
 
     if (hasFontCriteria && hasPattern) {
-      // AND mode: run regex only on font-filtered text, then map matches back to
-      // original text positions so body slicing still works on the full item stream.
-      const filtParts = [], filtOffsets = [], origStarts = [], origEnds = [];
-      let fp = 0;
-      for (let i = 0; i < items.length; i++) {
-        if (RuleManager._matchesFontCriteria(items[i], rule)) {
-          filtOffsets.push({ start: fp, end: fp + items[i].text.length });
-          origStarts.push(offsets[i].start);
-          origEnds.push(offsets[i].end);
-          filtParts.push(items[i].text);
-          fp += items[i].text.length + 1;
-        }
-      }
-      const filtText = filtParts.join(' ');
-
+      // AND mode: run regex on the full text so mixed-font matches like
+      // "4 WORM HOLE" (digit at 8.5pt, title at 13pt) are found.
+      // Boundary START = first font-qualifying item in the match (not raw regex
+      // match start) — this prevents non-font interstitial text like a page
+      // footer between a digit and the actual heading from being swept into
+      // titleItems.  Boundary END = last font-qualifying item (prevents greedy
+      // regex from pulling in the first capital of the following body word).
       let flags = rule.flags || 'g';
       if (!flags.includes('g')) flags += 'g';
       let regex;
       try { regex = new RegExp(rule.pattern, flags); } catch (e) { /* invalid */ }
-      if (regex && filtText) {
-        const cg = rule.captureGroup ?? 0;
-        for (const m of filtText.matchAll(regex)) {
-          // Find which filtered-item index this match starts in
-          let fi = filtOffsets.findIndex(fo => fo.start <= m.index && m.index < fo.end);
-          if (fi < 0) fi = filtOffsets.findIndex(fo => fo.start > m.index); // gap → next item
-          if (fi < 0) continue;
-          // Find last filtered-item index the match touches
-          const mEnd = m.index + m[0].length;
-          let li = fi;
-          while (li + 1 < filtOffsets.length && filtOffsets[li + 1].start < mEnd) li++;
+      if (regex) {
+        for (const m of text.matchAll(regex)) {
+          const matchStart = m.index;
+          const matchEnd   = m.index + m[0].length;
+          let firstFontStart = null, lastFontEnd = null;
+          const fontItems = [];
+          for (let i = 0; i < items.length; i++) {
+            const o = offsets[i];
+            if (o.start >= matchStart && o.start < matchEnd &&
+                RuleManager._matchesFontCriteria(items[i], rule)) {
+              if (firstFontStart === null) firstFontStart = o.start;
+              lastFontEnd = o.end;
+              fontItems.push(items[i]);
+            }
+          }
+          if (firstFontStart === null) continue; // no font-qualifying items → skip
+          // Title is built from font-qualifying items only — the raw regex match
+          // may be greedy and consume body text or non-font interstitial text.
           boundaries.push({
-            start: origStarts[fi],
-            end: origEnds[li],
-            title: (cg > 0 ? m[cg] : m[0])?.trim() ?? '',
+            start: firstFontStart,
+            end: lastFontEnd,
+            title: fontItems.map(i => i.text).join(' ').trim(),
             source: 'both',
             match: m,
           });
@@ -470,6 +480,7 @@ export class RuleManager {
         title: b.title,
         body: text.slice(bodyStart, bodyEnd).trim(),
         bodyItems: sliceItems(bodyStart, bodyEnd),
+        titleItems: sliceItems(b.start, b.end),
       });
     }
 
@@ -493,7 +504,7 @@ export class RuleManager {
   }
 
   static _applyStrip(items, rule) {
-    const hasFontCriteria = rule.minFontSize != null || rule.maxFontSize != null ||
+    const hasFontCriteria = rule.fontSize != null ||
                             !!rule.fontNameContains || !!rule.fontColor;
     const hasPattern = !!rule.pattern;
     if (!hasFontCriteria && !hasPattern) return items;

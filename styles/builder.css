@@ -578,6 +578,97 @@ mark.dajb-match {
   flex: 1;
 }
 
+/* ── Preview selectable items ─────────────────────────────────── */
+
+/* Force text selection on — Foundry sets user-select: none globally */
+.dajb-preview-content,
+.dajb-preview-body-text,
+.dajb-preview-preamble,
+.dajb-preview-section-title {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+.dajb-preview-item {
+  cursor: text;
+  border-radius: 2px;
+  transition: background 0.1s;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+.dajb-preview-item:hover {
+  background: rgba(126, 200, 227, 0.15);
+  outline: 1px solid rgba(126, 200, 227, 0.3);
+}
+
+.dajb-preview-more-inline {
+  color: #555;
+  font-style: italic;
+  font-size: 10px;
+}
+
+/* ── Selection toolbar ────────────────────────────────────────── */
+
+.dajb-selection-toolbar {
+  position: fixed;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #1e2a36;
+  border: 1px solid #4a9eba;
+  border-radius: 6px;
+  padding: 6px 10px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+  font-size: 12px;
+  color: #ccc;
+  max-width: 520px;
+  pointer-events: all;
+}
+
+.dajb-sel-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.dajb-sel-sample {
+  color: #aaa;
+  font-style: italic;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+
+.dajb-sel-attrs {
+  color: #7ec8e3;
+  font-size: 11px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.dajb-sel-create-btn {
+  flex-shrink: 0;
+  background: #1a5276;
+  border-color: #2980b9;
+  color: #fff;
+  font-weight: bold;
+  white-space: nowrap;
+}
+.dajb-sel-create-btn:hover { background: #2471a3; }
+
+.dajb-sel-dismiss-btn {
+  flex-shrink: 0;
+  font-size: 16px;
+  color: #666;
+  padding: 0 4px;
+}
+.dajb-sel-dismiss-btn:hover { color: #fff; background: #444; }
+
 /* ── Scrollbars ───────────────────────────────────────────────── */
 
 .dajb-rules-tree::-webkit-scrollbar,

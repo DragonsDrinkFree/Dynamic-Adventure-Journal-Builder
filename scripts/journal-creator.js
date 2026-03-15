@@ -103,7 +103,7 @@ export class JournalCreator {
    * rendered as headings inside the parent page's HTML.
    * `journal` is the parent JournalEntry; required when any child creates pages.
    */
-  static async _buildBodyHTML(text, bodyItems, children, pdfParser, parentRanges, journal = null) {
+  static async _buildBodyHTML(text, bodyItems, children, pdfParser, parentRanges, journal = null, preserveFormatting = false) {
     if (!text && !bodyItems?.length) return "";
 
     // Apply strip rules first, then find the primary boundary child
@@ -111,15 +111,29 @@ export class JournalCreator {
 
     const primaryChild = children?.find(c =>
       (c.ruleType === 'create-page' || c.ruleType === 'create-section') &&
-      (c.pattern || c.minFontSize != null || c.maxFontSize != null || c.fontNameContains || c.fontColor)
+      (c.pattern || c.fontSize != null || c.fontNameContains || c.fontColor)
     );
     if (!primaryChild) {
+      // No child rule — render body as final content
+      if (preserveFormatting && cleanedItems.length) {
+        return `<p>${PDFParser.itemsToHTML(cleanedItems)}</p>`;
+      }
       const cleanedText = cleanedItems.length ? cleanedItems.map(i => i.text).join(' ').trim() : text;
       return cleanedText ? `<p>${cleanedText}</p>` : "";
     }
 
+    // Child rule's own preserveFormatting setting (inherits from parent if not set)
+    const childPF = primaryChild.preserveFormatting ?? preserveFormatting;
+
     const sections = RuleManager.splitOnCombinedTargeting(cleanedItems, primaryChild);
     const namedSecs = sections.filter(s => s.match !== null);
+
+    // Render a body segment (preamble or inter-section text)
+    const renderBody = (seg) => {
+      if (!seg.body && !seg.bodyItems?.length) return "";
+      if (childPF && seg.bodyItems?.length) return `<p>${PDFParser.itemsToHTML(seg.bodyItems)}</p>`;
+      return seg.body ? `<p>${seg.body}</p>` : "";
+    };
 
     // create-page child: each match becomes its own journal page
     if (primaryChild.ruleType === 'create-page' && journal) {
@@ -129,12 +143,12 @@ export class JournalCreator {
       }
       for (const sec of namedSecs) {
         const subHTML = await JournalCreator._buildBodyHTML(
-          sec.body, sec.bodyItems, primaryChild.children, pdfParser, parentRanges, journal
+          sec.body, sec.bodyItems, primaryChild.children, pdfParser, parentRanges, journal, childPF
         );
         const pageData = {
           name: sec.title,
           type: "text",
-          text: { content: subHTML || (sec.body ? `<p>${sec.body}</p>` : ""), format: 1 },
+          text: { content: subHTML || renderBody(sec), format: 1 },
         };
         if (primaryChild.targetCategory && categoryMap.has(primaryChild.targetCategory)) {
           pageData.category = categoryMap.get(primaryChild.targetCategory);
@@ -147,23 +161,20 @@ export class JournalCreator {
     // create-section child: each match becomes an inline heading
     let html = "";
     for (const sec of sections) {
-      if (sec.match === null) {
-        if (sec.body) html += `<p>${sec.body}</p>`;
-        continue;
-      }
+      if (sec.match === null) { html += renderBody(sec); continue; }
       const level = primaryChild.outputFormat?.headingLevel || 3;
       const subBody = await JournalCreator._buildBodyHTML(
-        sec.body, sec.bodyItems, primaryChild.children, pdfParser, parentRanges, journal
+        sec.body, sec.bodyItems, primaryChild.children, pdfParser, parentRanges, journal, childPF
       );
-      html += `<h${level}>${sec.title}</h${level}>` + (subBody || (sec.body ? `<p>${sec.body}</p>` : ""));
+      html += `<h${level}>${sec.title}</h${level}>` + (subBody || renderBody(sec));
     }
-    return html || (text ? `<p>${text}</p>` : "");
+    return html || (preserveFormatting && cleanedItems.length ? `<p>${PDFParser.itemsToHTML(cleanedItems)}</p>` : (text ? `<p>${text}</p>` : ""));
   }
 
   // ── Text helpers ──────────────────────────────────────────────────────────
 
   static async _getTextForRule(rule, pdfParser, ranges) {
-    const hasFontFilter = rule.minFontSize != null || rule.maxFontSize != null || rule.fontNameContains;
+    const hasFontFilter = rule.fontSize != null || rule.fontNameContains;
     if (hasFontFilter) {
       const items = await pdfParser.getPagesItems(ranges);
       const filtered = PDFParser.filterByCriteria(items, rule);
@@ -178,7 +189,7 @@ export class JournalCreator {
    * Otherwise return the text as-is.
    */
   static async _getFilteredText(text, rule, pdfParser, parentRanges) {
-    const hasFontFilter = rule.minFontSize != null || rule.maxFontSize != null || rule.fontNameContains;
+    const hasFontFilter = rule.fontSize != null || rule.fontNameContains;
     if (hasFontFilter && parentRanges && pdfParser) {
       const items = await pdfParser.getPagesItems(parentRanges);
       const filtered = PDFParser.filterByCriteria(items, rule);
