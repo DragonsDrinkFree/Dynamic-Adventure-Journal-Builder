@@ -13,6 +13,7 @@ export class RuleManager {
     return {
       id: foundry.utils.randomID(),
       name: "New Rule",
+      ruleType: "boundary",   // "boundary" | "strip"
       // top-level only
       pageRanges: "",
       targetJournal: "",
@@ -447,6 +448,87 @@ export class RuleManager {
     }
 
     return sections;
+  }
+
+  /**
+   * Apply all strip-type children to an items array, returning the cleaned result.
+   * Strip rules are processed before boundary children split the body.
+   */
+  static stripContent(items, children) {
+    const strips = children?.filter(c => c.ruleType === 'strip') ?? [];
+    if (!strips.length) return items;
+    let current = items;
+    for (const rule of strips) {
+      current = RuleManager._applyStrip(current, rule);
+      // Recursively apply any strip children of this strip rule
+      if (rule.children?.length) current = RuleManager.stripContent(current, rule.children);
+    }
+    return current;
+  }
+
+  static _applyStrip(items, rule) {
+    const hasFontCriteria = rule.minFontSize != null || rule.maxFontSize != null ||
+                            !!rule.fontNameContains || !!rule.fontColor;
+    const hasPattern = !!rule.pattern;
+    if (!hasFontCriteria && !hasPattern) return items;
+
+    // Build per-item offsets in the joined text (used by regex path)
+    let pos = 0;
+    const itemRanges = items.map(item => {
+      const r = { start: pos, end: pos + item.text.length };
+      pos += item.text.length + 1;
+      return r;
+    });
+
+    const buildRegex = () => {
+      let flags = rule.flags || 'g';
+      if (!flags.includes('g')) flags += 'g';
+      try { return new RegExp(rule.pattern, flags); } catch (e) { return null; }
+    };
+
+    if (hasFontCriteria && !hasPattern) {
+      // Font-only: drop all font-matching items
+      return items.filter(item => !RuleManager._matchesFontCriteria(item, rule));
+    }
+
+    if (hasFontCriteria && hasPattern) {
+      // AND: drop items that match font criteria AND whose text falls within a regex match
+      // on the font-filtered sub-text
+      const regex = buildRegex();
+      if (!regex) return items;
+
+      // Build filtered text from font-matching items with their positions in the original array
+      let fp = 0;
+      const fontIdxs = [], filtRanges = [];
+      items.forEach((item, i) => {
+        if (RuleManager._matchesFontCriteria(item, rule)) {
+          filtRanges.push({ start: fp, end: fp + item.text.length });
+          fontIdxs.push(i);
+          fp += item.text.length + 1;
+        }
+      });
+      const filtText = fontIdxs.map(i => items[i].text).join(' ');
+
+      const toRemove = new Set();
+      for (const m of filtText.matchAll(regex)) {
+        const mEnd = m.index + m[0].length;
+        filtRanges.forEach((fr, fi) => {
+          if (fr.start >= m.index && fr.end <= mEnd) toRemove.add(fontIdxs[fi]);
+        });
+      }
+      return items.filter((_, i) => !toRemove.has(i));
+    }
+
+    // Regex-only: remove items that lie entirely within a regex match range
+    const text = items.map(i => i.text).join(' ');
+    const regex = buildRegex();
+    if (!regex) return items;
+    const stripRanges = [...text.matchAll(regex)].map(m => ({ start: m.index, end: m.index + m[0].length }));
+    if (!stripRanges.length) return items;
+    return items.filter((_, i) => {
+      const r = itemRanges[i];
+      return !stripRanges.some(sr => r.start >= sr.start && r.end <= sr.end);
+    });
   }
 
   /**

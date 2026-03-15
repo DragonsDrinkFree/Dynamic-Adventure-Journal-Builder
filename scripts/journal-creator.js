@@ -52,15 +52,23 @@ export class JournalCreator {
 
     const journal = await JournalCreator._getOrCreateJournal(rule.targetJournal || rule.name);
 
+    // Pre-create all categories in one batch before any pages are written.
+    // This prevents the race where a page is created before its category exists.
+    const categoryMap = new Map(); // catName → id
+    if (rule.targetCategory) {
+      const needed = rule.categoryMode === "dynamic"
+        ? namedSections.map(s => s.title)
+        : [rule.targetCategory];
+      await JournalCreator._ensureCategories(journal, needed, categoryMap);
+    }
+
     for (const section of namedSections) {
-      let category = null;
-      if (rule.targetCategory) {
-        const catName = rule.categoryMode === "dynamic" ? section.title : rule.targetCategory;
-        category = await JournalCreator._getOrCreateCategory(journal, catName);
-      }
+      const catName = rule.targetCategory
+        ? (rule.categoryMode === "dynamic" ? section.title : rule.targetCategory)
+        : null;
 
       const bodyHTML = await JournalCreator._buildBodyHTML(
-        section.body, section.bodyItems, rule.children, pdfParser, ranges
+        section.body, section.bodyItems, rule.children, pdfParser, ranges, journal
       );
 
       if (rule.createsNewPage) {
@@ -69,7 +77,7 @@ export class JournalCreator {
           type: "text",
           text: { content: bodyHTML, format: 1 },
         };
-        if (category) pageData.category = category;
+        if (catName && categoryMap.has(catName)) pageData.category = categoryMap.get(catName);
         await journal.createEmbeddedDocuments("JournalEntryPage", [pageData]);
       }
     }
@@ -83,28 +91,69 @@ export class JournalCreator {
    * Text between child matches is output as paragraphs.
    * If no child rules, the raw text is wrapped in <p>.
    */
-  static async _buildBodyHTML(text, bodyItems, children, pdfParser, parentRanges) {
+  /**
+   * Build the HTML body for a section, applying child rules recursively.
+   * If a child rule has createsNewPage=true it creates actual journal pages (and
+   * returns "" so nothing is inlined into the parent).  Otherwise sections are
+   * rendered as headings inside the parent page's HTML.
+   * `journal` is the parent JournalEntry; required when any child creates pages.
+   */
+  static async _buildBodyHTML(text, bodyItems, children, pdfParser, parentRanges, journal = null) {
     if (!text && !bodyItems?.length) return "";
 
-    const primaryChild = children?.find(c => c.pattern || c.minFontSize != null || c.maxFontSize != null || c.fontNameContains || c.fontColor);
+    // Apply strip rules first, then find the primary boundary child
+    const cleanedItems = RuleManager.stripContent(bodyItems ?? [], children);
+
+    const primaryChild = children?.find(c => c.ruleType !== 'strip' && (c.pattern || c.minFontSize != null || c.maxFontSize != null || c.fontNameContains || c.fontColor));
     if (!primaryChild) {
-      return text ? `<p>${text}</p>` : "";
+      const cleanedText = cleanedItems.length ? cleanedItems.map(i => i.text).join(' ').trim() : text;
+      return cleanedText ? `<p>${cleanedText}</p>` : "";
     }
 
-    const sections = RuleManager.splitOnCombinedTargeting(bodyItems ?? [], primaryChild);
+    const sections = RuleManager.splitOnCombinedTargeting(cleanedItems, primaryChild);
 
+    // If this child rule creates pages, build them as journal pages (not inline HTML)
+    if (primaryChild.createsNewPage && journal) {
+      const namedSecs = sections.filter(s => s.match !== null);
+
+      // Pre-create all categories before writing pages
+      const categoryMap = new Map();
+      if (primaryChild.targetCategory) {
+        const needed = primaryChild.categoryMode === "dynamic"
+          ? namedSecs.map(s => s.title)
+          : [primaryChild.targetCategory];
+        await JournalCreator._ensureCategories(journal, needed, categoryMap);
+      }
+
+      for (const sec of namedSecs) {
+        const catName = primaryChild.targetCategory
+          ? (primaryChild.categoryMode === "dynamic" ? sec.title : primaryChild.targetCategory)
+          : null;
+        const subHTML = await JournalCreator._buildBodyHTML(
+          sec.body, sec.bodyItems, primaryChild.children, pdfParser, parentRanges, journal
+        );
+        const pageData = {
+          name: sec.title,
+          type: "text",
+          text: { content: subHTML || (sec.body ? `<p>${sec.body}</p>` : ""), format: 1 },
+        };
+        if (catName && categoryMap.has(catName)) pageData.category = categoryMap.get(catName);
+        await journal.createEmbeddedDocuments("JournalEntryPage", [pageData]);
+      }
+      return ""; // parent page body gets nothing; child pages hold the content
+    }
+
+    // Otherwise render as inline headings inside the parent page
     let html = "";
-
     for (const sec of sections) {
       if (sec.match === null) {
         if (sec.body) html += `<p>${sec.body}</p>`;
         continue;
       }
-
       const level = primaryChild.outputFormat?.headingLevel || 3;
       const titleHTML = `<h${level}>${sec.title}</h${level}>`;
       const subBody = await JournalCreator._buildBodyHTML(
-        sec.body, sec.bodyItems, primaryChild.children, pdfParser, parentRanges
+        sec.body, sec.bodyItems, primaryChild.children, pdfParser, parentRanges, journal
       );
       html += titleHTML + (subBody || (sec.body ? `<p>${sec.body}</p>` : ""));
     }
@@ -153,26 +202,39 @@ export class JournalCreator {
     return journal;
   }
 
-  static async _getOrCreateCategory(journal, categoryName) {
-    if (!categoryName) return null;
+  /**
+   * Ensure all named categories exist on the journal in a single update.
+   * Populates `outMap` (name → id) for every name in `names`.
+   * Calling this once before page creation avoids the race where pages are
+   * written before their category exists in the journal document.
+   */
+  static async _ensureCategories(journal, names, outMap = new Map()) {
+    const unique = [...new Set(names.filter(Boolean))];
+    if (!unique.length) return outMap;
     try {
-      const cats = journal.categories ?? journal.system?.categories ?? [];
-      const existing = cats.find(c => c.name === categoryName);
-      if (existing) return existing.id ?? existing._id ?? existing.name;
-
-      if (typeof journal.createCategory === "function") {
-        const cat = await journal.createCategory({ name: categoryName });
-        return cat.id ?? cat._id ?? categoryName;
+      // Re-read live categories from the document each time
+      const cats = foundry.utils.deepClone(
+        journal.categories ?? journal.system?.categories ?? []
+      );
+      const toAdd = [];
+      for (const name of unique) {
+        const existing = cats.find(c => c.name === name);
+        if (existing) {
+          outMap.set(name, existing.id ?? existing._id ?? name);
+        } else {
+          const newCat = { id: foundry.utils.randomID(), name };
+          cats.push(newCat);
+          toAdd.push(newCat);
+          outMap.set(name, newCat.id);
+        }
       }
-
-      const existingCats = foundry.utils.deepClone(cats);
-      const newCat = { id: foundry.utils.randomID(), name: categoryName };
-      existingCats.push(newCat);
-      await journal.update({ "system.categories": existingCats });
-      return newCat.id;
+      if (toAdd.length) {
+        // One update — all new categories land in the journal simultaneously
+        await journal.update({ "system.categories": cats });
+      }
     } catch (e) {
-      console.warn("DAJB | Could not create category:", e.message);
-      return null;
+      console.warn("DAJB | Could not ensure categories:", e.message);
     }
+    return outMap;
   }
 }

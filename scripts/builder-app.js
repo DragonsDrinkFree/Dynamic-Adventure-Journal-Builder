@@ -112,9 +112,15 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     // Label
     const label = document.createElement("span");
     label.className = "dajb-rule-label";
-    label.textContent = rule.name || "(unnamed)";
     label.dataset.action = "select-rule";
     label.dataset.ruleId = rule.id;
+    if (rule.ruleType === "strip") {
+      const badge = document.createElement("span");
+      badge.className = "dajb-strip-badge";
+      badge.textContent = "strip";
+      label.appendChild(badge);
+    }
+    label.appendChild(document.createTextNode(rule.name || "(unnamed)"));
     item.appendChild(label);
 
     const wrapper = document.createElement("div");
@@ -162,12 +168,13 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
   _buildEditorHTML(rule, isTopLevel) {
     const fmt = rule.outputFormat;
+    const isStrip = rule.ruleType === 'strip';
     return `
       <div class="dajb-editor-form">
-        <div class="dajb-editor-header">
+        <div class="dajb-editor-header ${isStrip ? 'strip-header' : ''}">
           <strong>${isTopLevel ? "Section Rule" : "Child Rule"}</strong>
           <div class="dajb-editor-actions">
-            ${isTopLevel ? `<button type="button" data-action="add-child-rule" title="Add child rule">+ Child</button>` : ""}
+            ${!isStrip ? `<button type="button" data-action="add-child-rule" title="Add child rule">+ Child</button>` : ""}
             <button type="button" data-action="delete-rule" class="dajb-btn-danger" title="Delete this rule">Delete</button>
           </div>
         </div>
@@ -177,7 +184,15 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           <input type="text" data-field="name" value="${this._esc(rule.name)}" />
         </label>
 
-        ${isTopLevel ? `
+        <label class="dajb-field">
+          <span>Rule Type</span>
+          <select data-field="ruleType">
+            <option value="boundary" ${!isStrip ? "selected" : ""}>Boundary — splits text into sections</option>
+            <option value="strip"    ${ isStrip ? "selected" : ""}>Strip — removes matched text</option>
+          </select>
+        </label>
+
+        ${isTopLevel && !isStrip ? `
         <label class="dajb-field">
           <span>Page Ranges</span>
           <input type="text" data-field="pageRanges" value="${this._esc(rule.pageRanges)}" placeholder="e.g. 11-50, 61-70" />
@@ -186,23 +201,28 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           <span>Target Journal</span>
           <input type="text" data-field="targetJournal" value="${this._esc(rule.targetJournal)}" placeholder="Journal name" />
         </label>
+        ` : ""}
+
+        ${!isStrip ? `
         <label class="dajb-field">
           <span>Target Category</span>
-          <input type="text" data-field="targetCategory" value="${this._esc(rule.targetCategory)}" placeholder="Category name" />
+          <input type="text" data-field="targetCategory" value="${this._esc(rule.targetCategory)}" placeholder="Leave blank for none" />
         </label>
         <label class="dajb-field">
           <span>Category Mode</span>
           <select data-field="categoryMode">
-            <option value="static" ${rule.categoryMode === "static" ? "selected" : ""}>Static (one category)</option>
-            <option value="dynamic" ${rule.categoryMode === "dynamic" ? "selected" : ""}>Dynamic (one per match)</option>
+            <option value="static"  ${rule.categoryMode === "static"  ? "selected" : ""}>Static — one fixed category</option>
+            <option value="dynamic" ${rule.categoryMode === "dynamic" ? "selected" : ""}>Dynamic — one category per match</option>
           </select>
         </label>
         ` : ""}
 
+        ${!isStrip ? `
         <label class="dajb-field dajb-field-check">
           <input type="checkbox" data-field="createsNewPage" ${rule.createsNewPage ? "checked" : ""} />
           <span>Each match creates a new page</span>
         </label>
+        ` : `<em class="dajb-hint dajb-strip-hint">Matched text is removed from the body before boundary rules run. Use font criteria, regex, or both (AND).</em>`}
 
         <fieldset class="dajb-fieldset">
           <legend>Font Targeting</legend>
@@ -227,26 +247,29 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
               <input type="text" data-field="fontColor" value="${this._esc(rule.fontColor ?? '')}" placeholder="#rrggbb (from Inspector)" class="dajb-monospace" style="width:140px" />
             </div>
           </label>
-          <em class="dajb-hint">Use the Fonts inspector to discover font names and colors. With no regex pattern, font criteria alone defines section boundaries — each matching run becomes the section title.</em>
+          <em class="dajb-hint">Use the Fonts inspector to discover names and colors. Font + regex = AND (both must match).</em>
         </fieldset>
 
         <fieldset class="dajb-fieldset">
           <legend>Regex Pattern</legend>
           <label class="dajb-field">
             <span>Pattern</span>
-            <input type="text" data-field="pattern" value="${this._esc(rule.pattern)}" placeholder="e.g. ^## (.+)$  (leave blank to match all font-filtered text)" class="dajb-monospace" />
+            <input type="text" data-field="pattern" value="${this._esc(rule.pattern)}" placeholder="e.g. ^## (.+)$" class="dajb-monospace" />
           </label>
           <label class="dajb-field">
             <span>Flags</span>
             <input type="text" data-field="flags" value="${this._esc(rule.flags)}" placeholder="gi" style="width:60px" />
           </label>
+          ${!isStrip ? `
           <label class="dajb-field">
             <span>Title Capture Group</span>
             <input type="number" data-field="captureGroup" value="${rule.captureGroup ?? 0}" min="0" style="width:60px" />
             <em class="dajb-hint">0 = full match</em>
           </label>
+          ` : ""}
         </fieldset>
 
+        ${!isStrip ? `
         <fieldset class="dajb-fieldset">
           <legend>Output</legend>
           <label class="dajb-field">
@@ -272,6 +295,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             </select>
           </label>
         </fieldset>
+        ` : ""}
       </div>
     `;
   }
@@ -302,6 +326,14 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       this.ruleManager.updateRule(ruleId, { [parent]: nested });
     } else {
       this.ruleManager.updateRule(ruleId, { [field]: value });
+    }
+
+    // Re-render editor when rule type changes (form shape differs per type)
+    if (field === "ruleType") {
+      this._renderRulesTree(); // update icon/style in tree
+      this._renderEditor();
+      if (this._inspectingFonts) this._renderFontInspector(); else this._renderPreview();
+      return;
     }
 
     // Update rule label in tree if name changed
@@ -409,18 +441,30 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     el.appendChild(titleEl);
 
     if (sec.bodyItems?.length || sec.body) {
-      const childRule = rule.children?.find(c => c.pattern || c.minFontSize != null || c.maxFontSize != null || c.fontNameContains || c.fontColor);
+      // 1. Apply strip rules first to clean the body items
+      const strippedItems = RuleManager.stripContent(sec.bodyItems ?? [], rule.children);
+      const hadStrips = rule.children?.some(c => c.ruleType === 'strip');
+      if (hadStrips && strippedItems.length < (sec.bodyItems?.length ?? 0)) {
+        const indicator = document.createElement("div");
+        indicator.className = "dajb-preview-strip-indicator";
+        const removed = (sec.bodyItems?.length ?? 0) - strippedItems.length;
+        indicator.textContent = `✂ ${removed} item${removed !== 1 ? "s" : ""} stripped`;
+        el.appendChild(indicator);
+      }
+
+      // 2. Find first boundary child and split the (now stripped) body
+      const childRule = rule.children?.find(c => c.ruleType !== 'strip' && (c.pattern || c.minFontSize != null || c.maxFontSize != null || c.fontNameContains || c.fontColor));
       if (childRule) {
-        const childSections = RuleManager.splitOnCombinedTargeting(sec.bodyItems ?? [], childRule);
+        const childSections = RuleManager.splitOnCombinedTargeting(strippedItems, childRule);
         for (const childSec of childSections) {
           el.appendChild(this._buildSectionEl(childSec, childRule, depth + 1));
         }
       } else {
-        // No child rule — show raw body text
+        const bodyText = strippedItems.map(i => i.text).join(' ').trim() || sec.body;
         const bodyEl = document.createElement("div");
         bodyEl.className = "dajb-preview-body-text";
-        const preview = sec.body.slice(0, MAX_BODY);
-        bodyEl.textContent = preview + (sec.body.length > MAX_BODY ? "…" : "");
+        const preview = bodyText.slice(0, MAX_BODY);
+        bodyEl.textContent = preview + (bodyText.length > MAX_BODY ? "…" : "");
         el.appendChild(bodyEl);
       }
     }

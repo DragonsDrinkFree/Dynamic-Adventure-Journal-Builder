@@ -425,6 +425,40 @@
 .dajb-preview-section.depth-1 .dajb-preview-section-title { color: #9ade9a; }
 .dajb-preview-section.depth-2 .dajb-preview-section-title { color: #f0d060; }
 .dajb-preview-section.depth-3 .dajb-preview-section-title { color: #d898d8; }
+.dajb-preview-section.depth-4 { border-left-color: #5bbfbf; background: rgba(91, 191, 191, 0.08); }
+.dajb-preview-section.depth-5 { border-left-color: #e07878; background: rgba(224, 120, 120, 0.08); }
+.dajb-preview-section.depth-4 .dajb-preview-section-title { color: #5bbfbf; }
+.dajb-preview-section.depth-5 .dajb-preview-section-title { color: #e07878; }
+
+/* Strip rule indicators */
+.dajb-preview-strip-indicator {
+  font-size: 10px;
+  color: #e07878;
+  padding: 2px 6px;
+  margin: 2px 0;
+  border-left: 2px solid #e07878;
+  opacity: 0.7;
+}
+
+/* Strip rule badges in the rules tree */
+.dajb-strip-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: bold;
+  color: #e07878;
+  background: rgba(224, 120, 120, 0.15);
+  border: 1px solid rgba(224, 120, 120, 0.4);
+  border-radius: 3px;
+  padding: 0 4px;
+  margin-right: 5px;
+  text-transform: uppercase;
+  vertical-align: middle;
+  line-height: 14px;
+}
+
+/* Strip rule editor header tint */
+.dajb-editor-header.strip-header { border-bottom-color: rgba(224, 120, 120, 0.4); }
+.dajb-strip-hint { color: #e07878 !important; }
 
 .dajb-preview-body-text {
   padding: 4px 8px;
