@@ -54,6 +54,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     this._selectionToolbar = null;
     this._selectionChangeBound = null;
     this._selectionDebounce = null;
+    this._previewRefreshTimer = null;
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -184,7 +185,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
     // Attach live-update listeners
     panel.querySelectorAll("[data-field]").forEach((el) => {
-      const evt = el.type === "checkbox" ? "change" : "input";
+      const evt = (el.type === "checkbox" || el.tagName === "SELECT") ? "change" : "input";
       el.addEventListener(evt, (e) => this._onFieldChange(e, rule.id));
     });
   }
@@ -310,6 +311,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           <label class="dajb-field">
             <span>Heading Level</span>
             <select data-field="outputFormat.headingLevel">
+              <option value="0" ${fmt.headingLevel === 0 ? "selected" : ""}>H0 — No heading (body only)</option>
               ${[1,2,3,4,5,6].map(n => `<option value="${n}" ${fmt.headingLevel === n ? "selected" : ""}">H${n}</option>`).join("")}
             </select>
           </label>` : ""}
@@ -362,7 +364,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     if (field === "ruleType") {
       this._renderRulesTree(); // update icon/style in tree
       this._renderEditor();
-      if (this._inspectingFonts) this._renderFontInspector(); else this._renderPreview();
+      this._schedulePreviewRefresh(true);
       return;
     }
 
@@ -374,17 +376,32 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       if (label) label.textContent = value || "(unnamed)";
     }
 
-    // Refresh preview (or keep inspector open) on targeting-related changes
+    // Refresh preview on targeting-related changes — debounced for text fields
+    // so typing doesn't steal focus by re-rendering on every character.
     if (["pattern", "flags", "pageRanges", "captureGroup", "fontSize", "fontNameContains", "fontColor"].includes(field)) {
-      if (this._inspectingFonts) {
-        this._renderFontInspector();
-      } else {
-        this._renderPreview();
-      }
+      const isTextInput = ["pattern", "flags", "pageRanges", "fontNameContains", "fontColor"].includes(field);
+      this._schedulePreviewRefresh(!isTextInput);
     }
   }
 
   // ── Preview Panel ─────────────────────────────────────────────────────────
+
+  /**
+   * Schedule a preview refresh after a short debounce so rapid keystrokes
+   * (e.g. typing a pattern) don't steal focus by re-rendering on every character.
+   * Pass immediate=true to skip the delay (e.g. after a select/checkbox change).
+   */
+  _schedulePreviewRefresh(immediate = false) {
+    clearTimeout(this._previewRefreshTimer);
+    const refresh = () => {
+      if (this._inspectingFonts) this._renderFontInspector(); else this._renderPreview();
+    };
+    if (immediate) {
+      refresh();
+    } else {
+      this._previewRefreshTimer = setTimeout(refresh, 2000);
+    }
+  }
 
   async _renderPreview() {
     const container = this.element?.querySelector("#dajb-preview-content");

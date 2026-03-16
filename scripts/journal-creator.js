@@ -162,11 +162,12 @@ export class JournalCreator {
     let html = "";
     for (const sec of sections) {
       if (sec.match === null) { html += renderBody(sec); continue; }
-      const level = primaryChild.outputFormat?.headingLevel || 3;
+      const level = +(primaryChild.outputFormat?.headingLevel ?? 3);
       const subBody = await JournalCreator._buildBodyHTML(
         sec.body, sec.bodyItems, primaryChild.children, pdfParser, parentRanges, journal, childPF
       );
-      html += `<h${level}>${sec.title}</h${level}>` + (subBody || renderBody(sec));
+      const body = subBody || renderBody(sec);
+      html += level === 0 ? body : `<h${level}>${sec.title}</h${level}>` + body;
     }
     return html || (preserveFormatting && cleanedItems.length ? `<p>${PDFParser.itemsToHTML(cleanedItems)}</p>` : (text ? `<p>${text}</p>` : ""));
   }
