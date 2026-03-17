@@ -158,11 +158,86 @@ export class JournalCreator {
       return "";
     }
 
-    // create-section child: each match becomes an inline heading
+    // create-section child: each match becomes an inline heading or list item
+    const level = +(primaryChild.outputFormat?.headingLevel ?? 3);
+    const asList = primaryChild.outputFormat?.asList ?? false;
+    const listType = primaryChild.outputFormat?.listType ?? 'ul';
+
+    // Collate mode: all matches are merged under a single user-defined heading.
+    // Child rules of this rule are still applied to each match's body.
+    if (primaryChild.groupName) {
+      const groupName = primaryChild.groupName;
+      const titleHTML = level > 0 ? `<h${level}>${groupName}</h${level}>` : '';
+      // When child rules produce structured HTML (headings, multiple blocks) we
+      // preserve that structure. Without child rules, every body is a plain <p>
+      // so we strip the wrappers and inline everything into a single paragraph.
+      const hasGrandchildren = primaryChild.children?.some(c => c.ruleType !== 'strip');
+      // Strip a single wrapping <p> only when the full string is one paragraph
+      const inlineBody = (s) => s ? s.replace(/^<p>([\s\S]*)<\/p>$/i, '$1').trim() : '';
+      let html = "";
+      const collectedHTML = [];
+      for (const sec of sections) {
+        if (sec.match === null) { html += renderBody(sec); continue; }
+        const subBody = await JournalCreator._buildBodyHTML(
+          sec.body, sec.bodyItems, primaryChild.children, pdfParser, parentRanges, journal, childPF
+        );
+        const bodyContent = subBody || renderBody(sec);
+        const titlePart = sec.title ? `<strong>${sec.title}</strong>` : '';
+        if (asList) {
+          const bodyInner = hasGrandchildren ? bodyContent : inlineBody(bodyContent);
+          collectedHTML.push(`<li>${titlePart}${bodyInner ? ' ' + bodyInner : ''}</li>`);
+        } else if (hasGrandchildren) {
+          // Structured child output — keep each block intact, prefix with bold title
+          collectedHTML.push((titlePart ? `<p>${titlePart}</p>` : '') + bodyContent);
+        } else {
+          // No child rules — strip <p> wrappers so everything flows in one paragraph
+          collectedHTML.push(titlePart + (inlineBody(bodyContent) ? ' ' + inlineBody(bodyContent) : ''));
+        }
+      }
+      if (collectedHTML.length) {
+        if (asList) {
+          html += titleHTML + `<${listType}>${collectedHTML.join('')}</${listType}>`;
+        } else if (hasGrandchildren) {
+          html += titleHTML + collectedHTML.join('');
+        } else {
+          html += titleHTML + `<p>${collectedHTML.join(' ')}</p>`;
+        }
+      }
+      return html || (text ? `<p>${text}</p>` : "");
+    }
+
+    // List mode: preamble as prose, matched sections as <li> items
+    if (asList) {
+      let html = "";
+      const liItems = [];
+      for (const sec of sections) {
+        if (sec.match === null) { html += renderBody(sec); continue; }
+        const subBody = await JournalCreator._buildBodyHTML(
+          sec.body, sec.bodyItems, primaryChild.children, pdfParser, parentRanges, journal, childPF
+        );
+        // Strip wrapping <p>...</p> from subBody so it flows inline with the title
+        const bodyInner = subBody
+          ? subBody.replace(/^<p>([\s\S]*?)<\/p>$/i, '$1').trim()
+          : (sec.body?.trim() ?? '');
+        if (level === 0) {
+          // Title + body both go in the <li> (no heading tag)
+          const content = bodyInner ? `${sec.title} ${bodyInner}` : sec.title;
+          liItems.push(`<li>${content}</li>`);
+        } else {
+          // Heading inside the <li>
+          const titleHTML = `<strong>${sec.title}</strong>`;
+          const content = bodyInner ? `${titleHTML} ${bodyInner}` : titleHTML;
+          liItems.push(`<li>${content}</li>`);
+        }
+      }
+      if (liItems.length) html += `<${listType}>${liItems.join('')}</${listType}>`;
+      return html || (preserveFormatting && cleanedItems.length ? `<p>${PDFParser.itemsToHTML(cleanedItems)}</p>` : (text ? `<p>${text}</p>` : ""));
+    }
+
+    // Heading mode (default): each match becomes a heading + body block
     let html = "";
     for (const sec of sections) {
       if (sec.match === null) { html += renderBody(sec); continue; }
-      const level = +(primaryChild.outputFormat?.headingLevel ?? 3);
       const subBody = await JournalCreator._buildBodyHTML(
         sec.body, sec.bodyItems, primaryChild.children, pdfParser, parentRanges, journal, childPF
       );

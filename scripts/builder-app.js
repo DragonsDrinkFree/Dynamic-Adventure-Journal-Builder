@@ -193,10 +193,10 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
   _buildEditorHTML(rule, isTopLevel) {
     const fmt = rule.outputFormat;
     const type = rule.ruleType ?? 'create-section';
-    const isCat     = type === 'create-category';
-    const isPage    = type === 'create-page';
-    const isSection = type === 'create-section';
-    const isStrip   = type === 'strip';
+    const isCat       = type === 'create-category';
+    const isPage      = type === 'create-page';
+    const isSection   = type === 'create-section';
+    const isStrip     = type === 'strip';
     const hasTargeting = !isCat;
     const hasOutput    = isPage || isSection;
 
@@ -264,7 +264,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             <option value="create-category" ${isCat     ? "selected" : ""}>Create Category — meta rule, no text processing</option>
             <option value="create-page"     ${isPage    ? "selected" : ""}>Create Page — each match becomes a journal page</option>
             <option value="create-section"  ${isSection ? "selected" : ""}>Create Section — each match becomes a heading</option>
-            <option value="strip"           ${isStrip   ? "selected" : ""}>Strip — removes matched text</option>
+            <option value="strip"           ${isStrip     ? "selected" : ""}>Strip — removes matched text</option>
           </select>
         </label>
 
@@ -273,7 +273,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         <label class="dajb-field">
           <span>Page Ranges</span>
           <input type="text" data-field="pageRanges" value="${this._esc(rule.pageRanges)}" placeholder="e.g. 11-50, 61-70" />
-        </label>` : ""}
+        </label>
+` : ""}
         <label class="dajb-field">
           <span>Target Journal</span>
           <input type="text" data-field="targetJournal" value="${this._esc(rule.targetJournal)}" placeholder="Journal name" />
@@ -311,10 +312,10 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           <label class="dajb-field">
             <span>Heading Level</span>
             <select data-field="outputFormat.headingLevel">
-              <option value="0" ${fmt.headingLevel === 0 ? "selected" : ""}>H0 — No heading (body only)</option>
-              ${[1,2,3,4,5,6].map(n => `<option value="${n}" ${fmt.headingLevel === n ? "selected" : ""}">H${n}</option>`).join("")}
+              <option value="0"${fmt.headingLevel === 0 ? ' selected' : ''}>H0 — No heading (body only)</option>
+              ${[1,2,3,4,5,6].map(n => `<option value="${n}"${fmt.headingLevel === n ? ' selected' : ''}>H${n}</option>`).join("")}
             </select>
-          </label>` : ""}
+          </label>
           <label class="dajb-field dajb-field-check">
             <input type="checkbox" data-field="outputFormat.asList" ${fmt.asList ? "checked" : ""} />
             <span>Wrap in list</span>
@@ -322,10 +323,21 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           <label class="dajb-field">
             <span>List Type</span>
             <select data-field="outputFormat.listType">
-              <option value="ul" ${fmt.listType === "ul" ? "selected" : ""}>Unordered (ul)</option>
-              <option value="ol" ${fmt.listType === "ol" ? "selected" : ""}>Ordered (ol)</option>
+              <option value="ul"${fmt.listType === "ul" ? ' selected' : ''}>Unordered (ul)</option>
+              <option value="ol"${fmt.listType === "ol" ? ' selected' : ''}>Ordered (ol)</option>
             </select>
           </label>
+          <label class="dajb-field dajb-field-check">
+            <input type="checkbox" data-field="breakOnSentence" ${rule.breakOnSentence ? "checked" : ""} />
+            <span>Only break on sentence boundary (.!?)</span>
+          </label>
+          <em class="dajb-hint">Ignores matches that don't follow a sentence-ending character. Prevents mid-sentence bold text (e.g. "Dexterity Check") from splitting into its own section.</em>
+          <label class="dajb-field">
+            <span>Collate all matches under</span>
+            <input type="text" data-field="groupName" value="${this._esc(rule.groupName ?? '')}" placeholder="e.g. Description (leave empty for separate headings)" />
+          </label>
+          <em class="dajb-hint">When set, all matched text is merged under this single heading instead of creating one heading per match.</em>
+          ` : ""}
         </fieldset>
         ` : ""}
       </div>
@@ -340,8 +352,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     if (el.type === "checkbox") {
       value = el.checked;
     } else if (el.type === "number") {
-      // fontSize is nullable — empty string means "no filter"
-      const nullable = field === "fontSize";
+      // nullable number fields: empty string means "no filter"
+      const nullable = ["fontSize", "xMin", "xMax"].includes(field);
       value = (nullable && el.value === "") ? null : Number(el.value);
     } else if (el.tagName === "SELECT" && field === "outputFormat.headingLevel") {
       value = Number(el.value);
@@ -378,8 +390,10 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
     // Refresh preview on targeting-related changes — debounced for text fields
     // so typing doesn't steal focus by re-rendering on every character.
-    if (["pattern", "flags", "pageRanges", "captureGroup", "fontSize", "fontNameContains", "fontColor"].includes(field)) {
-      const isTextInput = ["pattern", "flags", "pageRanges", "fontNameContains", "fontColor"].includes(field);
+    if (["pattern", "flags", "pageRanges", "captureGroup", "fontSize", "fontNameContains", "fontColor",
+         "groupName", "breakOnSentence",
+         "outputFormat.headingLevel", "outputFormat.asList", "outputFormat.listType"].includes(field)) {
+      const isTextInput = ["pattern", "flags", "pageRanges", "fontNameContains", "fontColor", "groupName"].includes(field);
       this._schedulePreviewRefresh(!isTextInput);
     }
   }
@@ -394,7 +408,34 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
   _schedulePreviewRefresh(immediate = false) {
     clearTimeout(this._previewRefreshTimer);
     const refresh = () => {
-      if (this._inspectingFonts) this._renderFontInspector(); else this._renderPreview();
+      // Capture editor focus state before any render that might disturb DOM
+      const active = document.activeElement;
+      const editorPanel = this.element?.querySelector("#dajb-editor-panel");
+      let savedField = null, savedStart = null, savedEnd = null;
+      if (active && editorPanel?.contains(active) && active.dataset.field) {
+        savedField = active.dataset.field;
+        if (active.selectionStart != null) {
+          savedStart = active.selectionStart;
+          savedEnd   = active.selectionEnd;
+        }
+      }
+
+      if (this._inspectingFonts) {
+        this._renderFontInspector();
+      } else {
+        this._renderPreview();
+      }
+
+      // Restore focus to the editor field that was active before the refresh
+      if (savedField && editorPanel) {
+        const target = editorPanel.querySelector(`[data-field="${savedField}"]`);
+        if (target) {
+          target.focus({ preventScroll: true });
+          if (savedStart != null && target.setSelectionRange) {
+            try { target.setSelectionRange(savedStart, savedEnd); } catch (_) {}
+          }
+        }
+      }
     };
     if (immediate) {
       refresh();
@@ -430,7 +471,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         return;
       }
 
-      const items = await this.pdfParser.getPagesItems(ranges);
+      const items = await this.pdfParser.getPagesItems(ranges, {});
       const sections = RuleManager.splitOnCombinedTargeting(items, topRule);
       const named = sections.filter(s => s.match);
 
@@ -539,7 +580,87 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
       // 2. Find first boundary child and split the (now stripped) body
       const childRule = rule.children?.find(c => c.ruleType !== 'strip' && (c.pattern || c.fontSize != null || c.fontNameContains || c.fontColor));
-      if (childRule) {
+      if (childRule && childRule.ruleType === 'create-section' && childRule.groupName) {
+        // Collate mode: all matches merged under one named heading.
+        // Each match's body is still passed through any grandchild rules.
+        const childSections = RuleManager.splitOnCombinedTargeting(strippedItems, childRule);
+        const matches = childSections.filter(s => s.match !== null);
+        const level = +(childRule.outputFormat?.headingLevel ?? 2);
+        const hasGrandchildren = childRule.children?.some(c => c.ruleType !== 'strip');
+        // preamble prose
+        const preamble = childSections.find(s => s.match === null);
+        if (preamble?.body) el.appendChild(this._buildSectionEl(preamble, childRule, depth + 1));
+        if (matches.length) {
+          const groupEl = document.createElement('div');
+          groupEl.className = 'dajb-preview-collate-group';
+          if (level > 0) {
+            const hdr = document.createElement(`h${level}`);
+            hdr.className = 'dajb-preview-collate-heading';
+            hdr.textContent = childRule.groupName;
+            groupEl.appendChild(hdr);
+          }
+          if (hasGrandchildren) {
+            // Show each match as its own section so grandchild previews render
+            for (const childSec of matches) {
+              groupEl.appendChild(this._buildSectionEl(childSec, childRule, depth + 1));
+            }
+          } else {
+            // No grandchildren — compact inline rendering
+            const asList = childRule.outputFormat?.asList ?? false;
+            const listType = childRule.outputFormat?.listType ?? 'ul';
+            const contentEl = document.createElement(asList ? listType : 'p');
+            contentEl.className = 'dajb-preview-collate-body';
+            for (const childSec of matches) {
+              if (asList) {
+                const li = document.createElement('li');
+                const strong = document.createElement('strong');
+                strong.textContent = childSec.title;
+                li.appendChild(strong);
+                if (childSec.body) li.appendChild(document.createTextNode(' ' + childSec.body.slice(0, 100) + (childSec.body.length > 100 ? '…' : '')));
+                contentEl.appendChild(li);
+              } else {
+                contentEl.appendChild(document.createTextNode((childSec.title + (childSec.body ? ' ' + childSec.body : '') + ' ').slice(0, 120)));
+              }
+            }
+            groupEl.appendChild(contentEl);
+          }
+          const badge = document.createElement('span');
+          badge.className = 'dajb-preview-collate-badge';
+          badge.textContent = `${matches.length} match${matches.length !== 1 ? 'es' : ''} collated`;
+          groupEl.appendChild(badge);
+          el.appendChild(groupEl);
+        }
+      } else if (childRule && childRule.ruleType === 'create-section' && childRule.outputFormat?.asList) {
+        // List mode: render matched sections as bullet items
+        const childSections = RuleManager.splitOnCombinedTargeting(strippedItems, childRule);
+        const listType = childRule.outputFormat?.listType ?? 'ul';
+        const listEl = document.createElement(listType);
+        listEl.className = 'dajb-preview-section-list';
+        let hasItems = false;
+        for (const childSec of childSections) {
+          if (childSec.match === null) {
+            // Preamble rendered as prose before the list
+            if (hasItems) {
+              el.appendChild(listEl.cloneNode(true));
+              listEl.innerHTML = '';
+              hasItems = false;
+            }
+            el.appendChild(this._buildSectionEl(childSec, childRule, depth + 1));
+            continue;
+          }
+          const li = document.createElement('li');
+          li.className = 'dajb-preview-section-list-item';
+          const titleSpan = document.createElement('strong');
+          titleSpan.textContent = childSec.title;
+          li.appendChild(titleSpan);
+          if (childSec.body) {
+            li.appendChild(document.createTextNode(' ' + childSec.body.slice(0, 120) + (childSec.body.length > 120 ? '…' : '')));
+          }
+          listEl.appendChild(li);
+          hasItems = true;
+        }
+        if (hasItems) el.appendChild(listEl);
+      } else if (childRule) {
         const childSections = RuleManager.splitOnCombinedTargeting(strippedItems, childRule);
         for (const childSec of childSections) {
           el.appendChild(this._buildSectionEl(childSec, childRule, depth + 1));
@@ -760,7 +881,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     container.innerHTML = '<div class="dajb-preview-empty">Scanning fonts…</div>';
 
     try {
-      const items = await this.pdfParser.getPagesItems(ranges);
+      const items = await this.pdfParser.getPagesItems(ranges, {});
       const summary = PDFParser.getFontSummary(items);
 
       const wrap = document.createElement('div');
@@ -883,16 +1004,27 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
     const colorDot = color && color !== "#000000"
       ? `<span class="dajb-color-swatch" style="background:${color};flex-shrink:0"></span>` : "";
+    const canAddToCurrent = !!this.selectedRuleId &&
+      this.ruleManager.getRuleById(this.selectedRuleId)?.ruleType !== 'create-category';
+
     bar.innerHTML = `
       <div class="dajb-sel-info">
         ${colorDot}
         <span class="dajb-sel-sample">"${this._esc(sampleText)}"</span>
         <span class="dajb-sel-attrs">${fontSize ? fontSize + "pt" : ""}${fontName ? " · " + fontName : ""}${color !== "#000000" ? " · " + color : ""}</span>
       </div>
+      ${canAddToCurrent ? `<button type="button" class="dajb-btn dajb-sel-add-btn" title="Apply these font properties to the currently selected rule's targeting">+ Add to Rule</button>` : ""}
       <button type="button" class="dajb-btn dajb-sel-create-btn" title="Create a new rule targeting this text's font/size/color">+ Create Rule</button>
       <button type="button" class="dajb-icon-btn dajb-sel-dismiss-btn" title="Dismiss">×</button>
     `;
 
+    if (canAddToCurrent) {
+      bar.querySelector(".dajb-sel-add-btn").addEventListener("click", () => {
+        this._addToCurrentRule({ fontName, fontSize, color });
+        this._dismissSelectionToolbar();
+        window.getSelection()?.removeAllRanges();
+      });
+    }
     bar.querySelector(".dajb-sel-create-btn").addEventListener("click", () => {
       this._createRuleFromSelection({ fontName, fontSize, color });
       this._dismissSelectionToolbar();
@@ -917,6 +1049,19 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       this._selectionToolbar.remove();
       this._selectionToolbar = null;
     }
+  }
+
+  _addToCurrentRule({ fontName, fontSize, color }) {
+    if (!this.selectedRuleId) return;
+    const updates = {};
+    if (fontName)                                        updates.fontNameContains = fontName;
+    if (fontSize != null)                                updates.fontSize = fontSize;
+    if (color && color !== "#000000" && color !== "#ffffff") updates.fontColor = color;
+    if (!Object.keys(updates).length) return;
+    this.ruleManager.updateRule(this.selectedRuleId, updates);
+    this._renderEditor();
+    this._schedulePreviewRefresh(true);
+    ui.notifications?.info("DAJB | Font properties applied to current rule.");
   }
 
   _createRuleFromSelection({ fontName, fontSize, color }) {

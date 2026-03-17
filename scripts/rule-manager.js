@@ -30,6 +30,8 @@ export class RuleManager {
       // output
       outputTemplate: "{{match}}",
       preserveFormatting: false,
+      breakOnSentence: false, // only split at sentence boundaries (.!?)
+      groupName: "",          // if non-empty: all matches are collated under this single heading
       outputFormat: {
         headingLevel: 2,
         asList: false,
@@ -351,8 +353,7 @@ export class RuleManager {
   static splitOnCombinedTargeting(items, rule) {
     if (!items?.length) return [];
 
-    const hasFontCriteria = rule.fontSize != null ||
-                            !!rule.fontNameContains || !!rule.fontColor;
+    const hasFontCriteria = rule.fontSize != null || !!rule.fontNameContains || !!rule.fontColor;
     const hasPattern = !!rule.pattern;
 
     // No targeting at all: everything is body
@@ -450,6 +451,18 @@ export class RuleManager {
       }
     }
 
+    // Sentence-boundary filter: discard any boundary not preceded by .!?
+    // This prevents mid-sentence bold/formatted text from creating false splits.
+    if (rule.breakOnSentence && boundaries.length) {
+      const sentenceEnd = /[.!?]$/;
+      boundaries.splice(0, boundaries.length,
+        ...boundaries.filter(b => {
+          if (b.start === 0) return true;
+          return sentenceEnd.test(text.slice(0, b.start).trimEnd());
+        })
+      );
+    }
+
     if (!boundaries.length) {
       return [{ match: null, title: null, body: text.trim(), bodyItems: items }];
     }
@@ -504,8 +517,7 @@ export class RuleManager {
   }
 
   static _applyStrip(items, rule) {
-    const hasFontCriteria = rule.fontSize != null ||
-                            !!rule.fontNameContains || !!rule.fontColor;
+    const hasFontCriteria = rule.fontSize != null || !!rule.fontNameContains || !!rule.fontColor;
     const hasPattern = !!rule.pattern;
     if (!hasFontCriteria && !hasPattern) return items;
 

@@ -59,10 +59,17 @@ export class PDFParser {
     this._cache = new Map();
     /** @type {Map<number, Array<{text:string,fontSize:number,fontName:string}>>} */
     this._itemCache = new Map();
+    /** @type {Map<number, number>} page viewport width cache (pt) */
+    this._pageWidths = new Map();
   }
 
   get totalPages() {
     return this._totalPages;
+  }
+
+  /** Returns the viewport width (pt) for a loaded page, or 0 if unknown. */
+  getPageWidth(pageNum) {
+    return this._pageWidths.get(pageNum) ?? 0;
   }
 
   /**
@@ -80,6 +87,7 @@ export class PDFParser {
     this._totalPages = this._doc.numPages;
     this._cache.clear();
     this._itemCache.clear();
+    this._pageWidths.clear();
     console.log(`DAJB | PDF loaded: ${file.name} (${this._totalPages} pages)`);
     return this._totalPages;
   }
@@ -131,6 +139,9 @@ export class PDFParser {
     if (this._itemCache.has(pageNum)) return this._itemCache.get(pageNum);
 
     const page = await this._doc.getPage(pageNum);
+    const viewport = page.getViewport({ scale: 1 });
+    this._pageWidths.set(pageNum, viewport.width);
+
     const [content, opList] = await Promise.all([
       page.getTextContent(),
       page.getOperatorList().catch(() => null),
@@ -151,8 +162,12 @@ export class PDFParser {
         const fn = fontName.toLowerCase();
         const hasText = typeof item.str === 'string' && item.str.trim();
         const color = hasText ? (colorSeq[colorIdx++] ?? '#000000') : '#000000';
+        const rawX = item.transform?.[4] ?? 0;
         return { _keep: !!hasText, text: item.str, fontSize: Math.abs(item.transform?.[3] ?? 0),
           fontName, color,
+          x: rawX,
+          y: item.transform?.[5] ?? 0,
+          xNorm: viewport.width > 0 ? rawX / viewport.width : 0,
           isBold:   /bold|heavy|black|demi|semibold|extrabold|ultrabold/.test(fn),
           isItalic: /italic|oblique|slanted|inclined/.test(fn),
         };
@@ -235,17 +250,94 @@ export class PDFParser {
   /**
    * Return all structured text items across a set of page ranges.
    * @param {Array<{start:number, end:number}>} ranges
-   * @returns {Promise<Array<{text:string, fontSize:number, fontName:string}>>}
+   * @param {{ columnAware?: boolean }} [options]
+   * @returns {Promise<Array<{text:string, fontSize:number, fontName:string, x:number, y:number}>>}
    */
-  async getPagesItems(ranges) {
+  async getPagesItems(ranges, { columnAware = false } = {}) {
     if (!this._doc) throw new Error("No PDF loaded");
     const all = [];
     for (const { start, end } of ranges) {
       for (let p = start; p <= Math.min(end, this._totalPages); p++) {
-        all.push(...(await this.getPageItems(p)));
+        const pageItems = await this.getPageItems(p);
+        if (columnAware) {
+          all.push(...PDFParser.reorderForColumns(pageItems, this.getPageWidth(p)));
+        } else {
+          all.push(...pageItems);
+        }
       }
     }
     return all;
+  }
+
+  /**
+   * Detect whether `items` come from a two-column page layout and, if so,
+   * reorder them left-column-first top-to-bottom then right-column top-to-bottom.
+   *
+   * Algorithm:
+   *  1. Build an x-density histogram across the item x-span.
+   *  2. Look for a low-density gap bucket in the middle 20–80 % of the page width.
+   *     A bucket qualifies as a gap when its count < 20 % of average bucket density.
+   *  3. If a gap is found, split items at that x, sort each column descending Y
+   *     (higher Y = top of page in PDF coordinates), then ascending X within each
+   *     2 pt Y-tolerance line group.
+   *  4. Return [leftColumn, rightColumn] concatenated; or the original array if
+   *     no gap is detected (single-column page).
+   *
+   * @param {Array<{text:string, x:number, y:number}>} items
+   * @param {number} pageWidth  Viewport width in pt
+   * @returns {Array}
+   */
+  static reorderForColumns(items, pageWidth) {
+    if (!items?.length || !pageWidth) return items;
+
+    const BUCKETS = 20;
+    const xs = items.map(i => i.x);
+    const xMin = Math.min(...xs);
+    const xMax = Math.max(...xs);
+    if (xMax - xMin < 10) return items; // all items clustered — single column
+
+    const bucketWidth = (xMax - xMin) / BUCKETS;
+    const hist = new Array(BUCKETS).fill(0);
+    for (const x of xs) {
+      const b = Math.min(BUCKETS - 1, Math.floor((x - xMin) / bucketWidth));
+      hist[b]++;
+    }
+
+    const avgDensity = items.length / BUCKETS;
+    const gapThreshold = avgDensity * 0.20;
+
+    // Look for a gap bucket whose centre falls in the middle 20–80 % of page width
+    let splitX = null;
+    for (let b = 0; b < BUCKETS; b++) {
+      const bucketCentreX = xMin + (b + 0.5) * bucketWidth;
+      if (bucketCentreX < pageWidth * 0.20 || bucketCentreX > pageWidth * 0.80) continue;
+      if (hist[b] < gapThreshold) { splitX = bucketCentreX; break; }
+    }
+
+    if (splitX === null) return items; // no column gap detected
+
+    const sortColumn = (col) => {
+      const Y_TOL = 2; // pt — items within this Y range are on the same line
+      col.sort((a, b) => b.y - a.y || a.x - b.x);
+      const result = [];
+      let line = [];
+      for (const item of col) {
+        if (!line.length || Math.abs(item.y - line[0].y) <= Y_TOL) {
+          line.push(item);
+        } else {
+          line.sort((a, b) => a.x - b.x);
+          result.push(...line);
+          line = [item];
+        }
+      }
+      if (line.length) { line.sort((a, b) => a.x - b.x); result.push(...line); }
+      return result;
+    };
+
+    return [
+      ...sortColumn(items.filter(i => i.x <  splitX)),
+      ...sortColumn(items.filter(i => i.x >= splitX)),
+    ];
   }
 
   /**
@@ -281,6 +373,8 @@ export class PDFParser {
       if (rule.fontNameContains &&
           !item.fontName?.toLowerCase().includes(rule.fontNameContains.toLowerCase())) return false;
       if (rule.fontColor && item.color !== rule.fontColor.toLowerCase()) return false;
+      if (rule.xMin != null && (item.xNorm ?? 0) * 100 < rule.xMin) return false;
+      if (rule.xMax != null && (item.xNorm ?? 0) * 100 > rule.xMax) return false;
       return true;
     });
   }

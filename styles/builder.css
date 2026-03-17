@@ -479,7 +479,60 @@
 /* Editor header tints per rule type */
 .dajb-editor-header.strip-header    { border-bottom-color: rgba(224, 120, 120, 0.4); }
 .dajb-editor-header.category-header { border-bottom-color: rgba(126, 200, 227, 0.4); }
+.dajb-editor-header.block-header    { border-bottom-color: rgba(200, 168, 64,  0.4); }
 .dajb-strip-hint { color: #e07878 !important; }
+
+/* Stat block preview elements in the live preview panel */
+.dajb-preview-stat-block {
+  margin: 2px 8px 4px;
+  padding: 3px 8px;
+  background: rgba(200, 168, 64, 0.08);
+  border-left: 3px solid #c8a840;
+  border-radius: 0 3px 3px 0;
+  font-size: 11px;
+}
+
+.dajb-preview-stat-block-title {
+  font-weight: bold;
+  color: #d4b84a;
+  margin-right: 8px;
+}
+
+.dajb-preview-stat-block-body {
+  color: #888;
+  font-size: 10px;
+  font-style: italic;
+}
+
+/* block-text matched run preview */
+.dajb-preview-block-text-match {
+  margin: 2px 8px 2px;
+  padding: 2px 8px;
+  background: rgba(184, 122, 184, 0.10);
+  border-left: 3px solid #b87ab8;
+  border-radius: 0 3px 3px 0;
+  font-size: 11px;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.dajb-preview-block-text-tag {
+  font-size: 9px;
+  font-weight: bold;
+  color: #b87ab8;
+  border: 1px solid #b87ab8;
+  border-radius: 3px;
+  padding: 0 4px;
+  flex-shrink: 0;
+  text-transform: uppercase;
+  opacity: 0.85;
+}
+
+.dajb-preview-block-text-body {
+  color: #ccc;
+  font-size: 11px;
+}
 
 .dajb-preview-body-text {
   padding: 4px 8px;
@@ -651,6 +704,16 @@ mark.dajb-match {
   flex-shrink: 0;
 }
 
+.dajb-sel-add-btn {
+  flex-shrink: 0;
+  background: #1a472a;
+  border-color: #27ae60;
+  color: #fff;
+  font-weight: bold;
+  white-space: nowrap;
+}
+.dajb-sel-add-btn:hover { background: #1e8449; }
+
 .dajb-sel-create-btn {
   flex-shrink: 0;
   background: #1a5276;
@@ -691,4 +754,51 @@ mark.dajb-match {
 .dajb-editor-panel::-webkit-scrollbar-thumb:hover,
 .dajb-preview-content::-webkit-scrollbar-thumb:hover {
   background: #666;
+}
+
+/* create-section list-mode preview */
+.dajb-preview-section-list {
+  margin: 4px 8px;
+  padding-left: 20px;
+  list-style: disc;
+  color: #ccc;
+  font-size: 11px;
+}
+.dajb-preview-section-list-item {
+  margin: 2px 0;
+  line-height: 1.4;
+}
+.dajb-preview-section-list-item strong {
+  color: #9ecae1;
+}
+
+/* Collate mode preview */
+.dajb-preview-collate-group {
+  border: 1px solid #5a8a5a;
+  border-radius: 3px;
+  margin: 4px 0;
+  padding: 4px 8px;
+  background: rgba(60, 100, 60, 0.15);
+}
+.dajb-preview-collate-heading {
+  color: #7ec87e;
+  font-size: 11px;
+  font-weight: bold;
+  margin: 0 0 3px 0;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.dajb-preview-collate-body {
+  color: #ccc;
+  font-size: 11px;
+  margin: 0;
+  padding-left: 16px;
+}
+.dajb-preview-collate-badge {
+  display: inline-block;
+  margin-top: 3px;
+  font-size: 10px;
+  color: #7ec87e;
+  opacity: 0.7;
+  font-style: italic;
 }
