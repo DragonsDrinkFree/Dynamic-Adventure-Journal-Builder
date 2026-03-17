@@ -173,6 +173,19 @@
 }
 .dajb-rule-item:hover { background: #2a2a2a; color: #fff; }
 .dajb-rule-item.selected { background: #1a3a5a; color: #7ec8e3; font-weight: bold; }
+/* Disabled rules: dim the label/toggle but leave the checkbox at full opacity */
+.dajb-rule-item.dajb-disabled .dajb-rule-label { opacity: 0.45; text-decoration: line-through; font-style: italic; }
+.dajb-rule-item.dajb-disabled .dajb-rule-toggle { opacity: 0.45; }
+.dajb-rule-item.dajb-disabled .dajb-rule-order  { opacity: 0.45; }
+
+.dajb-rule-enable-check {
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+  cursor: pointer;
+  accent-color: #9ade9a;
+  margin: 0 2px;
+}
 
 .dajb-rule-toggle {
   flex-shrink: 0;

@@ -13,8 +13,9 @@ export class RuleManager {
     return {
       id: foundry.utils.randomID(),
       name: "New Rule",
-      // "create-category" | "create-page" | "create-section" | "strip"
+      // "create-category" | "create-page" | "create-section" | "create-collated-section" | "strip"
       ruleType: "create-section",
+      disabled: false,
       // top-level only
       pageRanges: "",
       targetJournal: "",
@@ -515,6 +516,13 @@ export class RuleManager {
   static splitOnMultipleRules(items, childRules) {
     if (!items?.length || !childRules?.length) return [];
 
+    // Skip disabled rules entirely
+    childRules = childRules.filter(r => !r.disabled);
+    if (!childRules.length) {
+      const body = items.map(i => i.text).join(' ').trim();
+      return body ? [{ match: null, title: null, body, bodyItems: items, rule: null }] : [];
+    }
+
     // Map each item object → its index for O(1) lookup
     const itemToIdx = new Map(items.map((item, i) => [item, i]));
 
@@ -548,18 +556,19 @@ export class RuleManager {
     // section's start.  Any collate-rule boundaries that land inside that owned
     // span are removed so those items become body text of the plain section
     // instead of spawning a new collate group.
+    const isCollated = (r) => r?.ruleType === 'create-collated-section';
     for (let i = 0; i < merged.length; i++) {
-      if (merged[i].rule?.groupName) continue; // only plain sections claim body
+      if (isCollated(merged[i].rule)) continue; // only plain sections claim body
       // Find where this plain section's ownership ends (next plain section start)
       let nextPlainStart = items.length;
       for (let k = i + 1; k < merged.length; k++) {
-        if (!merged[k].rule?.groupName) { nextPlainStart = merged[k].itemStart; break; }
+        if (!isCollated(merged[k].rule)) { nextPlainStart = merged[k].itemStart; break; }
       }
       const bodyStart = merged[i].itemEnd;
       // Remove collate boundaries whose start falls inside [bodyStart, nextPlainStart)
       let j = i + 1;
       while (j < merged.length) {
-        if (merged[j].rule?.groupName &&
+        if (isCollated(merged[j].rule) &&
             merged[j].itemStart >= bodyStart &&
             merged[j].itemStart < nextPlainStart) {
           merged.splice(j, 1);
@@ -593,7 +602,7 @@ export class RuleManager {
    * Strip rules are processed before boundary children split the body.
    */
   static stripContent(items, children) {
-    const strips = children?.filter(c => c.ruleType === 'strip') ?? [];
+    const strips = children?.filter(c => c.ruleType === 'strip' && !c.disabled) ?? [];
     if (!strips.length) return items;
     let current = items;
     for (const rule of strips) {

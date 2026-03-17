@@ -24,7 +24,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       "save-rules":    function(ev, t) { BuilderApp._onSaveRules.call(this, ev, t); },
       "build-journal": function(ev, t) { BuilderApp._onBuildJournal.call(this, ev, t); },
       "add-top-rule":  function(ev, t) { BuilderApp._onAddTopRule.call(this, ev, t); },
-      "add-child-rule":function(ev, t) { BuilderApp._onAddChildRule.call(this, ev, t); },
+      "add-child-rule":   function(ev, t) { BuilderApp._onAddChildRule.call(this, ev, t); },
+      "add-sibling-rule": function(ev, t) { BuilderApp._onAddSiblingRule.call(this, ev, t); },
       "delete-rule":   function(ev, t) { BuilderApp._onDeleteRule.call(this, ev, t); },
       "select-rule":   function(ev, t) { BuilderApp._onSelectRule.call(this, ev, t); },
       "collapse-rule":    function(ev, t) { BuilderApp._onCollapseRule.call(this, ev, t); },
@@ -121,7 +122,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     label.className = "dajb-rule-label";
     label.dataset.action = "select-rule";
     label.dataset.ruleId = rule.id;
-    const typeInfo = { "create-category": ["cat","#7ec8e3"], "create-page": ["page","#9ade9a"], "strip": ["strip","#e07878"] };
+    const typeInfo = { "create-category": ["cat","#7ec8e3"], "create-page": ["page","#9ade9a"], "strip": ["strip","#e07878"], "create-collated-section": ["collate","#e8a838"] };
     const ti = typeInfo[rule.ruleType];
     if (ti) {
       const badge = document.createElement("span");
@@ -133,6 +134,23 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     }
     label.appendChild(document.createTextNode(rule.name || "(unnamed)"));
     item.appendChild(label);
+
+    // Enable/disable checkbox — bound directly so opacity on parent can't block it
+    const enableCheck = document.createElement("input");
+    enableCheck.type = "checkbox";
+    enableCheck.className = "dajb-rule-enable-check";
+    enableCheck.checked = !rule.disabled;
+    enableCheck.title = "Enable / disable this rule";
+    enableCheck.addEventListener("change", (e) => {
+      e.stopPropagation();
+      this.ruleManager.updateRule(rule.id, { disabled: !enableCheck.checked });
+      item.classList.toggle("dajb-disabled", !enableCheck.checked);
+      this._renderRulesTree();
+      this._schedulePreviewRefresh(true);
+    });
+    item.appendChild(enableCheck);
+
+    if (rule.disabled) item.classList.add("dajb-disabled");
 
     // Order buttons
     const orderBtns = document.createElement("span");
@@ -196,12 +214,13 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     const isCat       = type === 'create-category';
     const isPage      = type === 'create-page';
     const isSection   = type === 'create-section';
+    const isCollated  = type === 'create-collated-section';
     const isStrip     = type === 'strip';
     const hasTargeting = !isCat;
-    const hasOutput    = isPage || isSection;
+    const hasOutput    = isPage || isSection || isCollated;
 
     const headerClass = isCat ? 'category-header' : isStrip ? 'strip-header' : '';
-    const canHaveChildren = isPage || isSection;
+    const canHaveChildren = isPage || isSection || isCollated;
 
     const fontTargetingFields = `
       <fieldset class="dajb-fieldset">
@@ -249,6 +268,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           <strong>${isTopLevel ? "Top-Level Rule" : "Child Rule"}</strong>
           <div class="dajb-editor-actions">
             ${canHaveChildren ? `<button type="button" data-action="add-child-rule" title="Add child rule">+ Child</button>` : ""}
+            ${!isTopLevel ? `<button type="button" data-action="add-sibling-rule" title="Add a new rule at the same level as this one">+ Sibling</button>` : ""}
             <button type="button" data-action="delete-rule" class="dajb-btn-danger">Delete</button>
           </div>
         </div>
@@ -261,10 +281,11 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         <label class="dajb-field">
           <span>Rule Type</span>
           <select data-field="ruleType">
-            <option value="create-category" ${isCat     ? "selected" : ""}>Create Category — meta rule, no text processing</option>
-            <option value="create-page"     ${isPage    ? "selected" : ""}>Create Page — each match becomes a journal page</option>
-            <option value="create-section"  ${isSection ? "selected" : ""}>Create Section — each match becomes a heading</option>
-            <option value="strip"           ${isStrip     ? "selected" : ""}>Strip — removes matched text</option>
+            <option value="create-category"          ${isCat      ? "selected" : ""}>Create Category — meta rule, no text processing</option>
+            <option value="create-page"             ${isPage     ? "selected" : ""}>Create Page — each match becomes a journal page</option>
+            <option value="create-section"          ${isSection  ? "selected" : ""}>Create Section — each match becomes a heading</option>
+            <option value="create-collated-section" ${isCollated ? "selected" : ""}>Collated Section — all matches merged under one heading</option>
+            <option value="strip"                   ${isStrip    ? "selected" : ""}>Strip — removes matched text</option>
           </select>
         </label>
 
@@ -308,7 +329,14 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             <span>Preserve bold / italic from PDF</span>
           </label>
           <em class="dajb-hint">Detected from font name (e.g. "Bold", "Italic"). Underline is not available from PDF text data.</em>
-          ${isSection ? `
+          ${(isSection || isCollated) ? `
+          ${isCollated ? `
+          <label class="dajb-field">
+            <span>Group Heading</span>
+            <input type="text" data-field="groupName" value="${this._esc(rule.groupName ?? '')}" placeholder="e.g. Description" />
+          </label>
+          <em class="dajb-hint">All matches are merged under this single heading.</em>
+          ` : ""}
           <label class="dajb-field">
             <span>Heading Level</span>
             <select data-field="outputFormat.headingLevel">
@@ -331,12 +359,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             <input type="checkbox" data-field="breakOnSentence" ${rule.breakOnSentence ? "checked" : ""} />
             <span>Only break on sentence boundary (.!?)</span>
           </label>
-          <em class="dajb-hint">Ignores matches that don't follow a sentence-ending character. Prevents mid-sentence bold text (e.g. "Dexterity Check") from splitting into its own section.</em>
-          <label class="dajb-field">
-            <span>Collate all matches under</span>
-            <input type="text" data-field="groupName" value="${this._esc(rule.groupName ?? '')}" placeholder="e.g. Description (leave empty for separate headings)" />
-          </label>
-          <em class="dajb-hint">When set, all matched text is merged under this single heading instead of creating one heading per match.</em>
+          <em class="dajb-hint">Ignores matches that don't follow a sentence-ending character. Prevents mid-sentence bold text from splitting into its own section.</em>
           ` : ""}
         </fieldset>
         ` : ""}
@@ -578,9 +601,11 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         el.appendChild(indicator);
       }
 
-      // 2. Find all qualifying create-section children; use multi-child mode when >1
+      // 2. Find all qualifying create-section/collated-section children; use multi-child mode when >1
       const sectionChildRules = rule.children?.filter(c =>
-        c.ruleType === 'create-section' && (c.pattern || c.fontSize != null || c.fontNameContains || c.fontColor)
+        (c.ruleType === 'create-section' || c.ruleType === 'create-collated-section') &&
+        !c.disabled &&
+        (c.pattern || c.fontSize != null || c.fontNameContains || c.fontColor)
       ) ?? [];
       const childRule = sectionChildRules[0] ?? null;
 
@@ -610,16 +635,10 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
               const contentEl = document.createElement(asList ? listType : 'p');
               contentEl.className = 'dajb-preview-collate-body';
               for (const s of secs) {
-                if (asList) {
-                  const li = document.createElement('li');
-                  const strong = document.createElement('strong');
-                  strong.textContent = s.title;
-                  li.appendChild(strong);
-                  if (s.body) li.appendChild(document.createTextNode(' ' + s.body.slice(0, 100) + (s.body.length > 100 ? '…' : '')));
-                  contentEl.appendChild(li);
-                } else {
-                  contentEl.appendChild(document.createTextNode((s.title + (s.body ? ' ' + s.body : '') + ' ').slice(0, 120)));
-                }
+                const container = asList ? document.createElement('li') : contentEl;
+                this._appendItemSpans(container, s.titleItems ?? [], { bold: true });
+                this._appendItemSpans(container, s.bodyItems ?? []);
+                if (asList) contentEl.appendChild(container);
               }
               groupEl.appendChild(contentEl);
             }
@@ -639,7 +658,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             continue;
           }
           const r = sec.rule;
-          if (r.groupName) {
+          if (r.ruleType === 'create-collated-section') {
             if (!pendingCollate.has(r)) pendingCollate.set(r, []);
             pendingCollate.get(r).push(sec);
           } else {
@@ -649,7 +668,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         }
         flushCollate();
 
-      } else if (childRule && childRule.ruleType === 'create-section' && childRule.groupName) {
+      } else if (childRule && childRule.ruleType === 'create-collated-section') {
         // Collate mode: all matches merged under one named heading.
         // Each match's body is still passed through any grandchild rules.
         const childSections = RuleManager.splitOnCombinedTargeting(strippedItems, childRule);
@@ -674,22 +693,16 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
               groupEl.appendChild(this._buildSectionEl(childSec, childRule, depth + 1));
             }
           } else {
-            // No grandchildren — compact inline rendering
+            // No grandchildren — compact inline rendering with selectable spans
             const asList = childRule.outputFormat?.asList ?? false;
             const listType = childRule.outputFormat?.listType ?? 'ul';
             const contentEl = document.createElement(asList ? listType : 'p');
             contentEl.className = 'dajb-preview-collate-body';
             for (const childSec of matches) {
-              if (asList) {
-                const li = document.createElement('li');
-                const strong = document.createElement('strong');
-                strong.textContent = childSec.title;
-                li.appendChild(strong);
-                if (childSec.body) li.appendChild(document.createTextNode(' ' + childSec.body.slice(0, 100) + (childSec.body.length > 100 ? '…' : '')));
-                contentEl.appendChild(li);
-              } else {
-                contentEl.appendChild(document.createTextNode((childSec.title + (childSec.body ? ' ' + childSec.body : '') + ' ').slice(0, 120)));
-              }
+              const container = asList ? document.createElement('li') : contentEl;
+              this._appendItemSpans(container, childSec.titleItems ?? [], { bold: true });
+              this._appendItemSpans(container, childSec.bodyItems ?? []);
+              if (asList) contentEl.appendChild(container);
             }
             groupEl.appendChild(contentEl);
           }
@@ -855,6 +868,18 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     }
     const child = this.ruleManager.createRule(this.selectedRuleId);
     this.selectedRuleId = child.id;
+    this._renderRulesTree();
+    this._renderEditor();
+    this._renderPreview();
+  }
+
+  static _onAddSiblingRule(event, target) {
+    if (!this.selectedRuleId) return;
+    const path = this.ruleManager.getPathToRule(this.selectedRuleId);
+    // path = [topLevel, ..., current] — parent is second-to-last, or null if top-level
+    const parentId = path.length > 1 ? path[path.length - 2].id : null;
+    const sibling = this.ruleManager.createRule(parentId);
+    this.selectedRuleId = sibling.id;
     this._renderRulesTree();
     this._renderEditor();
     this._renderPreview();
@@ -1142,7 +1167,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     let rule;
     if (this.selectedRuleId) {
       const parent = this.ruleManager.getRuleById(this.selectedRuleId);
-      if (parent && (parent.ruleType === "create-page" || parent.ruleType === "create-section")) {
+      if (parent && ["create-page", "create-section", "create-collated-section"].includes(parent.ruleType)) {
         // Create child under selected rule
         rule = this.ruleManager.createRule(this.selectedRuleId);
       } else {
@@ -1161,6 +1186,30 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
   }
 
   // ── Utility ───────────────────────────────────────────────────────────────
+
+  /** Append PDF item objects as selectable .dajb-preview-item spans into `container`. */
+  _appendItemSpans(container, items, { bold = false, limit = 150 } = {}) {
+    const shown = items.slice(0, limit);
+    for (const item of shown) {
+      const span = document.createElement('span');
+      span.className = 'dajb-preview-item';
+      span.textContent = item.text;
+      span.dataset.fontSize = item.fontSize;
+      span.dataset.fontName = item.fontName;
+      span.dataset.color    = item.color;
+      span.dataset.isBold   = item.isBold;
+      span.dataset.isItalic = item.isItalic;
+      if (bold) span.style.fontWeight = 'bold';
+      container.appendChild(span);
+      container.appendChild(document.createTextNode(' '));
+    }
+    if (items.length > limit) {
+      const more = document.createElement('span');
+      more.className = 'dajb-preview-more-inline';
+      more.textContent = `… (${items.length - limit} more)`;
+      container.appendChild(more);
+    }
+  }
 
   _esc(str) {
     return (str ?? "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");

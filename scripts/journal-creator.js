@@ -113,11 +113,12 @@ export class JournalCreator {
     const stripP = s => s ? s.replace(/^<p>([\s\S]*)<\/p>$/i, '$1').trim() : '';
 
     const pageChild = children?.find(c =>
-      c.ruleType === 'create-page' &&
+      c.ruleType === 'create-page' && !c.disabled &&
       (c.pattern || c.fontSize != null || c.fontNameContains || c.fontColor)
     );
     const sectionChildren = children?.filter(c =>
-      c.ruleType === 'create-section' &&
+      (c.ruleType === 'create-section' || c.ruleType === 'create-collated-section') &&
+      !c.disabled &&
       (c.pattern || c.fontSize != null || c.fontNameContains || c.fontColor)
     ) ?? [];
 
@@ -220,7 +221,7 @@ export class JournalCreator {
           continue;
         }
         const r = sec.rule;
-        if (r.groupName) {
+        if (r.ruleType === 'create-collated-section') {
           if (!pending.has(r)) pending.set(r, []);
           pending.get(r).push(sec);
         } else {
@@ -244,7 +245,7 @@ export class JournalCreator {
 
     // Collate mode: all matches are merged under a single user-defined heading.
     // Child rules of this rule are still applied to each match's body.
-    if (primaryChild.groupName) {
+    if (primaryChild.ruleType === 'create-collated-section') {
       const groupName = primaryChild.groupName;
       const titleHTML = level > 0 ? `<h${level}>${groupName}</h${level}>` : '';
       // When child rules produce structured HTML (headings, multiple blocks) we
