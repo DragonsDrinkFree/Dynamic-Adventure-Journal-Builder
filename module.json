@@ -16,25 +16,22 @@
   "flags": {
     "canUpload": true
   },
-  "description": "<p>Parse PDFs with regex rules and generate structured Foundry journal entries.</p>",
-  "esmodules": [
-    "scripts/main.js"
-  ],
-  "styles": [
-    {
-      "src": "styles/builder.css"
-    }
-  ],
+  "description": "Parse PDFs with regex rules and generate structured Foundry journal entries.",
+  "esmodules": ["scripts/main.js"],
+  "styles": ["styles/builder.css"],
   "packs": [
     {
-      "name": "dynamic-journal-builder",
-      "label": "Dynamic Journal Builder",
-      "path": "packs/dynamic-journal-builder",
+      "name": "dynamic-journal-builder-guide",
+      "label": "Dynamic Journal Builder Guide",
+      "path": "packs/dynamic-journal-builder-guide.db",
       "type": "JournalEntry",
       "ownership": {
         "PLAYER": "OBSERVER",
         "ASSISTANT": "OWNER"
       }
     }
-  ]
+  ],
+  "url": "",
+  "manifest": "https://github.com/DragonsDrinkFree/",
+  "download": "https://github.com/DragonsDrinkFree/"
 }
