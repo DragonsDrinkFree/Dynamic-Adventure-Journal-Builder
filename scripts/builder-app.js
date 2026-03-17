@@ -224,28 +224,17 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     const headerClass = isCat ? 'category-header' : (isStrip || isRemove) ? 'strip-header' : '';
     const canHaveChildren = isPage || isSection || isCollated;
 
-    const hasAdvancedFontSize = rule.minFontSize != null || rule.maxFontSize != null;
     const fontTargetingFields = `
       <fieldset class="dajb-fieldset">
         <legend>Font Targeting</legend>
         <label class="dajb-field">
           <span>Font Size (pt)</span>
-          <input type="number" data-field="fontSize" value="${rule.fontSize ?? ""}" min="0" step="0.5" placeholder="Any" style="width:80px" />
-        </label>
-        <details class="dajb-advanced-details"${hasAdvancedFontSize ? ' open' : ''}>
-          <summary class="dajb-advanced-summary">Advanced Font Size</summary>
-          <div class="dajb-advanced-content">
-            <em class="dajb-hint">Match a size range instead of (or in addition to) the exact value above.</em>
-            <label class="dajb-field">
-              <span>Min Font Size (pt)</span>
-              <input type="number" data-field="minFontSize" value="${rule.minFontSize ?? ""}" min="0" step="0.5" placeholder="Any" style="width:80px" />
-            </label>
-            <label class="dajb-field">
-              <span>Max Font Size (pt)</span>
-              <input type="number" data-field="maxFontSize" value="${rule.maxFontSize ?? ""}" min="0" step="0.5" placeholder="Any" style="width:80px" />
-            </label>
+          <div class="dajb-font-size-group">
+            <input type="number" data-field="fontSize" value="${rule.fontSize ?? ""}" min="0" step="0.5" placeholder="Any" class="dajb-font-size-input" />
+            <input type="checkbox" data-field="maxFontSizeEnabled" ${rule.maxFontSize != null ? 'checked' : ''} title="Enable max font size (range match)" />
+            ${rule.maxFontSize != null ? `<span class="dajb-font-size-max-label">max</span><input type="number" data-field="maxFontSize" value="${rule.maxFontSize}" min="0" step="0.5" class="dajb-font-size-input" />` : ''}
           </div>
-        </details>
+        </label>
         <label class="dajb-field">
           <span>Font Name Contains</span>
           <input type="text" data-field="fontNameContains" value="${this._esc(rule.fontNameContains ?? '')}" placeholder="e.g. Bold, Garamond" />
@@ -396,6 +385,16 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           </label>
           <em class="dajb-hint">Ignores matches that don't follow a sentence-ending character. Prevents mid-sentence bold text from splitting into its own section.</em>
           ` : ""}
+          <label class="dajb-field">
+            <span>Paragraph Detection</span>
+            <select data-field="outputFormat.paragraphDetection">
+              <option value=""${(fmt.paragraphDetection ?? '') === '' ? ' selected' : ''}>(none)</option>
+              <option value="spacing"${fmt.paragraphDetection === 'spacing' ? ' selected' : ''}>Spacing (Y-gap)</option>
+              <option value="indent"${fmt.paragraphDetection === 'indent' ? ' selected' : ''}>Indent</option>
+              <option value="both"${fmt.paragraphDetection === 'both' ? ' selected' : ''}>Both</option>
+            </select>
+          </label>
+          <em class="dajb-hint">Splits large text blocks into &lt;p&gt; paragraphs using line-gap analysis. "Spacing" uses Y-gap between lines; "Indent" uses first-line indentation; "Both" uses either signal.</em>
           <label class="dajb-field dajb-field-check">
             <input type="checkbox" data-field="preserveFormatting" ${rule.preserveFormatting ? "checked" : ""} />
             <span>Preserve bold / italic from PDF</span>
@@ -411,6 +410,17 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     const el = event.currentTarget;
     const field = el.dataset.field;
     let value;
+
+    // Synthetic field: toggles maxFontSize on/off, re-renders editor
+    if (field === "maxFontSizeEnabled") {
+      const rule = this.ruleManager.getRuleById(ruleId);
+      if (!rule) return;
+      const initMax = el.checked ? (rule.fontSize != null ? rule.fontSize + 2 : 12) : null;
+      this.ruleManager.updateRule(ruleId, { maxFontSize: initMax });
+      this._renderEditor();
+      this._schedulePreviewRefresh(true);
+      return;
+    }
 
     if (el.type === "checkbox") {
       value = el.checked;
@@ -455,7 +465,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     // so typing doesn't steal focus by re-rendering on every character.
     if (["pattern", "flags", "pageRanges", "captureGroup", "fontSize", "minFontSize", "maxFontSize",
          "fontNameContains", "fontColor", "groupName", "breakOnSentence",
-         "outputFormat.headingLevel", "outputFormat.additionalFormatting",
+         "outputFormat.headingLevel", "outputFormat.additionalFormatting", "outputFormat.paragraphDetection",
          "firstRowHeader", "columnGapMinPt"].includes(field)) {
       const isTextInput = ["pattern", "flags", "pageRanges", "fontNameContains", "fontColor", "groupName"].includes(field);
       this._schedulePreviewRefresh(!isTextInput);

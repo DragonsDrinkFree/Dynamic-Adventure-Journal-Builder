@@ -163,7 +163,7 @@ export class PDFParser {
         const hasText = typeof item.str === 'string' && item.str.trim();
         const color = hasText ? (colorSeq[colorIdx++] ?? '#000000') : '#000000';
         const rawX = item.transform?.[4] ?? 0;
-        return { _keep: !!hasText, text: item.str, fontSize: Math.abs(item.transform?.[3] ?? 0),
+        return { _keep: !!hasText, text: item.str, fontSize: Math.round(Math.abs(item.transform?.[3] ?? 0) * 100) / 100,
           fontName, color,
           x: rawX,
           y: item.transform?.[5] ?? 0,
@@ -267,7 +267,35 @@ export class PDFParser {
         }
       }
     }
-    return all;
+    return PDFParser.joinHyphenatedSplits(all);
+  }
+
+  /**
+   * Merge items where a trailing hyphen indicates a column/line break mid-word.
+   * Signal: item ends with `-` AND next item starts with a lowercase letter.
+   * Real compound hyphens (e.g. "frost-elf", "Hobbled-and-Blackened") are left
+   * untouched because the continuation either starts with a capital or is part of
+   * the same item.
+   */
+  static joinHyphenatedSplits(items) {
+    const out = [];
+    let i = 0;
+    while (i < items.length) {
+      const cur = items[i];
+      if (cur.text.endsWith('-') && i + 1 < items.length) {
+        const nxt = items[i + 1];
+        const nxtText = nxt.text;
+        // Only rejoin when the continuation starts with a lowercase letter
+        if (/^[a-z]/.test(nxtText)) {
+          out.push({ ...cur, text: cur.text.slice(0, -1) + nxtText });
+          i += 2;
+          continue;
+        }
+      }
+      out.push(cur);
+      i++;
+    }
+    return out;
   }
 
   /**
@@ -317,8 +345,9 @@ export class PDFParser {
 
     if (splitX === null) return items; // no column gap detected
 
+    const Y_TOL = 2; // pt — items within this Y range are on the same line
+
     const sortColumn = (col) => {
-      const Y_TOL = 2; // pt — items within this Y range are on the same line
       col.sort((a, b) => b.y - a.y || a.x - b.x);
       const result = [];
       let line = [];
@@ -335,10 +364,39 @@ export class PDFParser {
       return result;
     };
 
-    return [
-      ...sortColumn(items.filter(i => i.x <  splitX)),
-      ...sortColumn(items.filter(i => i.x >= splitX)),
-    ];
+    // Group all items into visual Y-lines, then separate spanning items
+    // (those with content on BOTH sides of the column gap) from column items.
+    // Spanning items — e.g. a full-width chapter title — are output first in
+    // their natural Y order so they appear before either column's text.
+    const allSorted = [...items].sort((a, b) => b.y - a.y || a.x - b.x);
+    const yLines = [];
+    let curLine = null;
+    for (const item of allSorted) {
+      if (!curLine || Math.abs(item.y - curLine[0].y) > Y_TOL) {
+        curLine = [item];
+        yLines.push(curLine);
+      } else {
+        curLine.push(item);
+      }
+    }
+
+    const spanningItems = [];
+    const leftItems     = [];
+    const rightItems    = [];
+    for (const line of yLines) {
+      const hasLeft  = line.some(i => i.x <  splitX);
+      const hasRight = line.some(i => i.x >= splitX);
+      if (hasLeft && hasRight) {
+        // Spanning line: keep left-to-right reading order within the line
+        spanningItems.push(...line.sort((a, b) => a.x - b.x));
+      } else if (hasRight) {
+        rightItems.push(...line);
+      } else {
+        leftItems.push(...line);
+      }
+    }
+
+    return [...spanningItems, ...sortColumn(leftItems), ...sortColumn(rightItems)];
   }
 
   /**
@@ -539,6 +597,125 @@ export class PDFParser {
     html += '</table>';
 
     return { html, rowCount: logicalRows.length, colCount };
+  }
+
+  /**
+   * Detect where paragraph breaks should be inserted in a (possibly
+   * column-reordered) items array.
+   *
+   * Two independent signals are supported and can be combined:
+   *   "spacing"  — Y gap between consecutive lines exceeds gapThreshold × the
+   *                median within-paragraph leading.  A Y-increase between
+   *                consecutive items signals a column boundary and is skipped.
+   *   "indent"   — The first item of a new line starts to the right of the
+   *                modal left-margin X by more than indentMinPt points.
+   *
+   * @param {Array}  items        — item array, already in reading order
+   * @param {object} [options]
+   * @param {string}  [options.mode="spacing"]  "spacing" | "indent" | "both"
+   * @param {number}  [options.gapThreshold=1.4] multiplier on median leading
+   * @param {number}  [options.indentMinPt=6]   minimum indent in pt
+   * @returns {Set<number>}  set of item indices that begin a new paragraph
+   */
+  static detectParagraphBreaks(items, { mode = 'spacing', gapThreshold = 1.4, indentMinPt = 6 } = {}) {
+    if (items.length < 2) return new Set();
+
+    const useSpacing = mode === 'spacing' || mode === 'both';
+    const useIndent  = mode === 'indent'  || mode === 'both';
+
+    // ── Group items into visual Y-lines ──────────────────────────────────────
+    // Y_TOL: use smallest fontSize found, capped to a sensible range
+    const sizes = items.map(i => i.fontSize).filter(Boolean);
+    const minSize = sizes.length ? Math.min(...sizes) : 10;
+    const yTol = Math.max(1, Math.min(minSize / 2, 4));
+
+    const lines = []; // [{y, firstX, items:[]}]
+    let cur = null;
+    for (const item of items) {
+      if (!cur || Math.abs(item.y - cur.y) > yTol) {
+        cur = { y: item.y, firstX: item.x, items: [item] };
+        lines.push(cur);
+      } else {
+        cur.items.push(item);
+        if (item.x < cur.firstX) cur.firstX = item.x;
+      }
+    }
+
+    // ── Spacing: compute median within-paragraph leading ─────────────────────
+    let medianLeading = 0;
+    if (useSpacing && lines.length > 1) {
+      const gaps = [];
+      for (let i = 1; i < lines.length; i++) {
+        const dy = lines[i - 1].y - lines[i].y; // positive = Y decreased (normal)
+        if (dy > 0) gaps.push(dy);
+      }
+      if (gaps.length) {
+        gaps.sort((a, b) => a - b);
+        // Lower 60 % excludes paragraph gaps (which are the larger values)
+        const lower = gaps.slice(0, Math.ceil(gaps.length * 0.6));
+        medianLeading = lower[Math.floor(lower.length / 2)] ?? gaps[0];
+      }
+    }
+
+    // ── Indent: compute modal left-margin X ──────────────────────────────────
+    let modalMarginX = 0;
+    if (useIndent && lines.length) {
+      const xBuckets = new Map();
+      for (const ln of lines) {
+        const bucket = Math.round(ln.firstX / 2) * 2; // 2 pt bins
+        xBuckets.set(bucket, (xBuckets.get(bucket) ?? 0) + 1);
+      }
+      modalMarginX = [...xBuckets.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 0;
+    }
+
+    // ── Mark break indices ────────────────────────────────────────────────────
+    const breaks = new Set();
+    let itemIdx = 0;
+    for (let i = 1; i < lines.length; i++) {
+      itemIdx += lines[i - 1].items.length;
+      const dy = lines[i - 1].y - lines[i].y;
+
+      if (dy <= 0) continue; // Y increased = column transition, never a paragraph break
+
+      const spacingBreak = useSpacing && medianLeading > 0 && dy > medianLeading * gapThreshold;
+      const indentBreak  = useIndent  && lines[i].firstX > modalMarginX + indentMinPt;
+
+      if (spacingBreak || indentBreak) breaks.add(itemIdx);
+    }
+    return breaks;
+  }
+
+  /**
+   * Render items as HTML with paragraph structure inferred from geometry.
+   * Returns one or more <p>…</p> blocks.
+   *
+   * @param {Array}  items
+   * @param {object} [options]
+   * @param {string}  [options.mode]              passed to detectParagraphBreaks
+   * @param {number}  [options.gapThreshold]      passed to detectParagraphBreaks
+   * @param {number}  [options.indentMinPt]       passed to detectParagraphBreaks
+   * @param {boolean} [options.preserveFormatting=false] use itemsToHTML vs plain text
+   * @returns {string}
+   */
+  static itemsToParagraphedHTML(items, options = {}) {
+    if (!items?.length) return '';
+    const { preserveFormatting = false, ...breakOpts } = options;
+    const breaks = PDFParser.detectParagraphBreaks(items, breakOpts);
+
+    const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const renderGroup = (grp) => preserveFormatting
+      ? PDFParser.itemsToHTML(grp)
+      : esc(grp.map(i => i.text).join(' '));
+
+    const paragraphs = [];
+    let cur = [];
+    for (let i = 0; i < items.length; i++) {
+      if (breaks.has(i) && cur.length) { paragraphs.push(cur); cur = []; }
+      cur.push(items[i]);
+    }
+    if (cur.length) paragraphs.push(cur);
+
+    return paragraphs.map(p => `<p>${renderGroup(p)}</p>`).join('');
   }
 
   /**

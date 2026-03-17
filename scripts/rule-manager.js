@@ -41,6 +41,7 @@ export class RuleManager {
       outputFormat: {
         headingLevel: 2,
         additionalFormatting: "", // "" | "ul" | "ol" | "blockquote" | "pre" | "secret"
+        paragraphDetection: "",   // "" | "spacing" | "indent" | "both"
       },
       children: [],
       ...overrides,
@@ -200,6 +201,10 @@ export class RuleManager {
         delete rule.outputFormat.asList;
         delete rule.outputFormat.listType;
       }
+      // Ensure paragraphDetection field exists
+      if (rule.outputFormat && rule.outputFormat.paragraphDetection === undefined) {
+        rule.outputFormat.paragraphDetection = '';
+      }
       // Ensure table-specific fields exist on loaded rules
       if (rule.ruleType === 'create-table') {
         if (rule.firstRowHeader === undefined) rule.firstRowHeader = true;
@@ -291,10 +296,15 @@ export class RuleManager {
 
   /** Test whether a single PDF text item satisfies this rule's font criteria. */
   static _matchesFontCriteria(item, rule) {
-    if (rule.fontSize != null) {
-      // Round both to nearest 0.5pt so floating-point PDF matrix values match
-      const rounded = Math.round(item.fontSize * 2) / 2;
-      if (rounded !== rule.fontSize) return false;
+    if (rule.fontSize != null || rule.maxFontSize != null) {
+      if (rule.maxFontSize != null) {
+        // Range mode: fontSize is lower bound (0 if unset), maxFontSize is upper bound
+        const min = rule.fontSize ?? 0;
+        if (item.fontSize < min || item.fontSize > rule.maxFontSize) return false;
+      } else {
+        // Decimal-range mode: match any size sharing the same integer part (10 matches 10.0–10.9)
+        if (Math.floor(item.fontSize) !== Math.floor(rule.fontSize)) return false;
+      }
     }
     if (rule.fontNameContains &&
         !item.fontName?.toLowerCase().includes(rule.fontNameContains.toLowerCase())) return false;

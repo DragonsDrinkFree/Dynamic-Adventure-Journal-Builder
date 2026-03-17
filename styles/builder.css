@@ -308,33 +308,19 @@
   gap: 6px;
 }
 
-/* Advanced font size toggle */
-.dajb-advanced-details {
-  margin: 0;
-}
-.dajb-advanced-summary {
-  cursor: pointer;
-  font-size: 11px;
-  color: #888;
-  user-select: none;
-  list-style: none;
+/* Font size inline group (exact input + range checkbox + max input) */
+.dajb-font-size-group {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
 }
-.dajb-advanced-summary::before {
-  content: '▶';
-  font-size: 9px;
-  transition: transform 0.15s;
+.dajb-font-size-input {
+  width: 62px;
 }
-.dajb-advanced-details[open] .dajb-advanced-summary::before {
-  transform: rotate(90deg);
-}
-.dajb-advanced-content {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding-top: 6px;
+.dajb-font-size-max-label {
+  font-size: 11px;
+  color: var(--color-text-light-secondary, #888);
+  white-space: nowrap;
 }
 
 .dajb-fieldset legend {
