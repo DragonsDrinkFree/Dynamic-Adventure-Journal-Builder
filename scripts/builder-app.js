@@ -709,15 +709,16 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             }
           } else {
             // No grandchildren — compact inline rendering with selectable spans
-            const asList = childRule.outputFormat?.asList ?? false;
-            const listType = childRule.outputFormat?.listType ?? 'ul';
-            const contentEl = document.createElement(asList ? listType : 'p');
+            const crAF   = childRule.outputFormat?.additionalFormatting
+              ?? (childRule.outputFormat?.asList ? (childRule.outputFormat?.listType ?? 'ul') : '');
+            const isList = crAF === 'ul' || crAF === 'ol';
+            const contentEl = document.createElement(isList ? crAF : 'p');
             contentEl.className = 'dajb-preview-collate-body';
             for (const childSec of matches) {
-              const container = asList ? document.createElement('li') : contentEl;
+              const container = isList ? document.createElement('li') : contentEl;
               this._appendItemSpans(container, childSec.titleItems ?? [], { bold: true });
               this._appendItemSpans(container, childSec.bodyItems ?? []);
-              if (asList) contentEl.appendChild(container);
+              if (isList) contentEl.appendChild(container);
             }
             groupEl.appendChild(contentEl);
           }

@@ -181,7 +181,8 @@ export class JournalCreator {
       const renderCollate = async (rule, secs) => {
         if (!secs.length) return '';
         const rl    = +(rule.outputFormat?.headingLevel ?? 2);
-        const af    = rule.outputFormat?.additionalFormatting ?? '';
+        const af    = rule.outputFormat?.additionalFormatting
+          ?? (rule.outputFormat?.asList ? (rule.outputFormat?.listType ?? 'ul') : '');
         const isList = af === 'ul' || af === 'ol';
         const hasGC = rule.children?.some(c => c.ruleType !== 'strip');
         const cPF   = rule.preserveFormatting ?? preserveFormatting;
@@ -201,13 +202,16 @@ export class JournalCreator {
             parts.push(tp + (bi ? ' ' + bi : ''));
           }
         }
-        if (isList)   return titleHTML + `<${af}>${parts.join('')}</${af}>`;
-        if (hasGC)    return titleHTML + parts.join('');
-        return titleHTML + `<p>${parts.join(' ')}</p>`;
+        if (isList) return titleHTML + `<${af}>${parts.join('')}</${af}>`;
+        const innerContent = hasGC ? parts.join('') : `<p>${parts.join(' ')}</p>`;
+        if (af === 'blockquote') return titleHTML + `<blockquote>${innerContent}</blockquote>`;
+        if (af === 'pre')        return titleHTML + `<pre><code>${innerContent.replace(/<[^>]*>/g, '')}</code></pre>`;
+        if (af === 'secret')     return `<section class="secret">${titleHTML}${innerContent}</section>`;
+        return titleHTML + innerContent;
       };
 
       let html = '';
-      const pending = new Map(); // rule → accumulated sections
+      const pending = new Map(); // collate rule → accumulated sections
 
       const flushAll = async () => {
         for (const [rule, secs] of pending) html += await renderCollate(rule, secs);
@@ -225,14 +229,28 @@ export class JournalCreator {
           if (!pending.has(r)) pending.set(r, []);
           pending.get(r).push(sec);
         } else {
-          // Plain section fires — flush open collate groups first
           await flushAll();
           if (r.ruleType === 'remove-section') continue; // drop title + body entirely
           const rl  = +(r.outputFormat?.headingLevel ?? 3);
+          const rAF = r.outputFormat?.additionalFormatting
+            ?? (r.outputFormat?.asList ? (r.outputFormat?.listType ?? 'ul') : '');
+          const rIsList = rAF === 'ul' || rAF === 'ol';
           const cPF = r.preserveFormatting ?? preserveFormatting;
           const sub = await JournalCreator._buildBodyHTML(sec.body, sec.bodyItems, r.children, pdfParser, parentRanges, journal, cPF);
           const body = sub || (sec.body ? `<p>${sec.body}</p>` : '');
-          html += rl === 0 ? body : `<h${rl}>${sec.title}</h${rl}>` + body;
+          const titleTag = rl > 0 ? `<h${rl}>${sec.title}</h${rl}>` : `<strong>${sec.title}</strong>`;
+          if (rIsList) {
+            const bi = body.replace(/^<p>([\s\S]*?)<\/p>$/i, '$1').trim();
+            html += `${titleTag}<${rAF}><li>${bi}</li></${rAF}>`;
+          } else if (rAF === 'blockquote') {
+            html += `${titleTag}<blockquote>${body}</blockquote>`;
+          } else if (rAF === 'pre') {
+            html += `${titleTag}<pre><code>${body.replace(/<[^>]*>/g, '')}</code></pre>`;
+          } else if (rAF === 'secret') {
+            html += `<section class="secret">${titleTag}${body}</section>`;
+          } else {
+            html += rl === 0 ? body : titleTag + body;
+          }
         }
       }
       await flushAll();
@@ -241,7 +259,8 @@ export class JournalCreator {
 
     // create-section child: each match becomes an inline heading or formatted block
     const level = +(primaryChild.outputFormat?.headingLevel ?? 3);
-    const af    = primaryChild.outputFormat?.additionalFormatting ?? '';
+    const af    = primaryChild.outputFormat?.additionalFormatting
+      ?? (primaryChild.outputFormat?.asList ? (primaryChild.outputFormat?.listType ?? 'ul') : '');
     const isList = af === 'ul' || af === 'ol';
 
     // Helper: wrap body HTML in the additional-formatting container
@@ -290,9 +309,15 @@ export class JournalCreator {
         }
       }
       if (collectedHTML.length) {
-        if (isList)          html += titleHTML + `<${af}>${collectedHTML.join('')}</${af}>`;
-        else if (hasGrandchildren) html += titleHTML + collectedHTML.join('');
-        else                 html += titleHTML + `<p>${collectedHTML.join(' ')}</p>`;
+        if (isList) {
+          html += titleHTML + `<${af}>${collectedHTML.join('')}</${af}>`;
+        } else {
+          const innerContent = hasGrandchildren ? collectedHTML.join('') : `<p>${collectedHTML.join(' ')}</p>`;
+          if (af === 'blockquote')  html += titleHTML + `<blockquote>${innerContent}</blockquote>`;
+          else if (af === 'pre')    html += titleHTML + `<pre><code>${innerContent.replace(/<[^>]*>/g, '')}</code></pre>`;
+          else if (af === 'secret') html += `<section class="secret">${titleHTML}${innerContent}</section>`;
+          else                      html += titleHTML + innerContent;
+        }
       }
       return html || (text ? `<p>${text}</p>` : "");
     }
@@ -300,7 +325,6 @@ export class JournalCreator {
     // Additional-formatting mode: list, blockquote, pre, or secret
     if (af) {
       let html = "";
-      const liItems = [];
       for (const sec of sections) {
         if (sec.match === null) { html += renderBody(sec); continue; }
         const subBody = await JournalCreator._buildBodyHTML(
@@ -309,13 +333,12 @@ export class JournalCreator {
         const body = subBody || renderBody(sec);
         if (isList) {
           const bodyInner = body.replace(/^<p>([\s\S]*?)<\/p>$/i, '$1').trim();
-          const titlePart = level === 0 ? sec.title : `<strong>${sec.title}</strong>`;
-          liItems.push(`<li>${titlePart}${bodyInner ? ' ' + bodyInner : ''}</li>`);
+          const titleTag = level > 0 ? `<h${level}>${sec.title}</h${level}>` : `<strong>${sec.title}</strong>`;
+          html += `${titleTag}<${af}><li>${bodyInner}</li></${af}>`;
         } else {
           html += wrapBody(body, sec.title);
         }
       }
-      if (isList && liItems.length) html += `<${af}>${liItems.join('')}</${af}>`;
       return html || (preserveFormatting && cleanedItems.length ? `<p>${PDFParser.itemsToHTML(cleanedItems)}</p>` : (text ? `<p>${text}</p>` : ""));
     }
 

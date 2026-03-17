@@ -551,19 +551,45 @@ export class RuleManager {
       return body ? [{ match: null, title: null, body, bodyItems: items, rule: null }] : [];
     }
 
-    // Sort by position; first boundary wins on overlap
-    allBoundaries.sort((a, b) => a.itemStart - b.itemStart);
+    const isCollated = (r) => r?.ruleType === 'create-collated-section';
+
+    // Sort by position; plain sections beat collate sections at the same position
+    // so an explicit create-section rule always wins over a collate rule on the same text.
+    allBoundaries.sort((a, b) => {
+      if (a.itemStart !== b.itemStart) return a.itemStart - b.itemStart;
+      const aC = a.rule?.ruleType === 'create-collated-section' ? 1 : 0;
+      const bC = b.rule?.ruleType === 'create-collated-section' ? 1 : 0;
+      return aC - bC;
+    });
     const merged = [];
     let lastEnd = 0;
     for (const b of allBoundaries) {
-      if (b.itemStart >= lastEnd) { merged.push(b); lastEnd = b.itemEnd; }
+      if (b.itemStart >= lastEnd) {
+        merged.push(b);
+        lastEnd = b.itemEnd;
+      } else if (isCollated(merged[merged.length - 1]?.rule) && !isCollated(b.rule)) {
+        // A plain-section boundary falls inside a collate boundary (font-only collates produce
+        // wide spans).  Truncate the collate to end at the plain section's start so the
+        // plain section can claim its text instead of being silently dropped.
+        const prev = merged[merged.length - 1];
+        const trimmedItems = prev.titleItems.filter(item => (itemToIdx.get(item) ?? Infinity) < b.itemStart);
+        if (trimmedItems.length) {
+          prev.titleItems = trimmedItems;
+          prev.itemEnd   = b.itemStart;
+          prev.title     = trimmedItems.map(i => i.text).join(' ').trim();
+        } else {
+          merged.pop(); // collate had no items before the plain section — drop it
+        }
+        merged.push(b);
+        lastEnd = b.itemEnd;
+      }
+      // else: skip — a higher-priority boundary already claimed this range
     }
 
     // Plain-section boundaries "own" all items from their end to the next plain
     // section's start.  Any collate-rule boundaries that land inside that owned
     // span are removed so those items become body text of the plain section
     // instead of spawning a new collate group.
-    const isCollated = (r) => r?.ruleType === 'create-collated-section';
     for (let i = 0; i < merged.length; i++) {
       if (isCollated(merged[i].rule)) continue; // only plain sections claim body
       // Find where this plain section's ownership ends (next plain section start)
