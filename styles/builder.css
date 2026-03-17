@@ -815,3 +815,23 @@ mark.dajb-match {
   opacity: 0.7;
   font-style: italic;
 }
+
+/* Remove-section preview */
+.dajb-preview-removed-section {
+  border: 1px solid #7a3a3a;
+  border-radius: 3px;
+  margin: 3px 0;
+  padding: 3px 8px;
+  background: rgba(120, 40, 40, 0.18);
+  font-size: 11px;
+  color: #aaa;
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+.dajb-preview-removed-label {
+  text-decoration: none;
+  color: #c87878;
+  font-weight: bold;
+  font-style: normal;
+  margin-right: 4px;
+}

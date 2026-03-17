@@ -122,7 +122,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     label.className = "dajb-rule-label";
     label.dataset.action = "select-rule";
     label.dataset.ruleId = rule.id;
-    const typeInfo = { "create-category": ["cat","#7ec8e3"], "create-page": ["page","#9ade9a"], "strip": ["strip","#e07878"], "create-collated-section": ["collate","#e8a838"] };
+    const typeInfo = { "create-category": ["cat","#7ec8e3"], "create-page": ["page","#9ade9a"], "strip": ["strip","#e07878"], "create-collated-section": ["collate","#e8a838"], "remove-section": ["remove","#c87878"] };
     const ti = typeInfo[rule.ruleType];
     if (ti) {
       const badge = document.createElement("span");
@@ -215,11 +215,12 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     const isPage      = type === 'create-page';
     const isSection   = type === 'create-section';
     const isCollated  = type === 'create-collated-section';
+    const isRemove    = type === 'remove-section';
     const isStrip     = type === 'strip';
     const hasTargeting = !isCat;
     const hasOutput    = isPage || isSection || isCollated;
 
-    const headerClass = isCat ? 'category-header' : isStrip ? 'strip-header' : '';
+    const headerClass = isCat ? 'category-header' : (isStrip || isRemove) ? 'strip-header' : '';
     const canHaveChildren = isPage || isSection || isCollated;
 
     const fontTargetingFields = `
@@ -281,11 +282,12 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         <label class="dajb-field">
           <span>Rule Type</span>
           <select data-field="ruleType">
-            <option value="create-category"          ${isCat      ? "selected" : ""}>Create Category — meta rule, no text processing</option>
-            <option value="create-page"             ${isPage     ? "selected" : ""}>Create Page — each match becomes a journal page</option>
-            <option value="create-section"          ${isSection  ? "selected" : ""}>Create Section — each match becomes a heading</option>
-            <option value="create-collated-section" ${isCollated ? "selected" : ""}>Collated Section — all matches merged under one heading</option>
-            <option value="strip"                   ${isStrip    ? "selected" : ""}>Strip — removes matched text</option>
+            <option value="create-category"          ${isCat      ? "selected" : ""}>New Category</option>
+            <option value="create-page"             ${isPage     ? "selected" : ""}>New Page</option>
+            <option value="create-section"          ${isSection  ? "selected" : ""}>New Section</option>
+            <option value="create-collated-section" ${isCollated ? "selected" : ""}>New Collated Section</option>
+            <option value="remove-section"          ${isRemove   ? "selected" : ""}>Remove Section</option>
+            <option value="strip"                   ${isStrip    ? "selected" : ""}>Remove Text</option>
           </select>
         </label>
 
@@ -316,7 +318,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         </label>
         ` : ""}
 
-        ${isStrip ? `<em class="dajb-hint dajb-strip-hint">Matched text is removed before boundary rules run.</em>` : ""}
+        ${isStrip  ? `<em class="dajb-hint dajb-strip-hint">Matched text is removed before boundary rules run.</em>` : ""}
+        ${isRemove ? `<em class="dajb-hint dajb-strip-hint">Matched section boundaries and their entire body are removed from the output.</em>` : ""}
 
         ${hasTargeting ? fontTargetingFields : ""}
         ${hasTargeting ? regexFields : ""}
@@ -603,7 +606,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
       // 2. Find all qualifying create-section/collated-section children; use multi-child mode when >1
       const sectionChildRules = rule.children?.filter(c =>
-        (c.ruleType === 'create-section' || c.ruleType === 'create-collated-section') &&
+        (c.ruleType === 'create-section' || c.ruleType === 'create-collated-section' || c.ruleType === 'remove-section') &&
         !c.disabled &&
         (c.pattern || c.fontSize != null || c.fontNameContains || c.fontColor)
       ) ?? [];
@@ -661,6 +664,18 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           if (r.ruleType === 'create-collated-section') {
             if (!pendingCollate.has(r)) pendingCollate.set(r, []);
             pendingCollate.get(r).push(sec);
+          } else if (r.ruleType === 'remove-section') {
+            flushCollate();
+            const removedEl = document.createElement('div');
+            removedEl.className = 'dajb-preview-removed-section';
+            removedEl.title = 'This section and its body are removed from output';
+            const label = document.createElement('span');
+            label.className = 'dajb-preview-removed-label';
+            label.textContent = '✂ removed: ';
+            removedEl.appendChild(label);
+            this._appendItemSpans(removedEl, sec.titleItems ?? []);
+            this._appendItemSpans(removedEl, sec.bodyItems ?? [], { limit: 30 });
+            el.appendChild(removedEl);
           } else {
             flushCollate();
             el.appendChild(this._buildSectionEl(sec, r, depth + 1));
@@ -711,6 +726,24 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           badge.textContent = `${matches.length} match${matches.length !== 1 ? 'es' : ''} collated`;
           groupEl.appendChild(badge);
           el.appendChild(groupEl);
+        }
+      } else if (childRule && childRule.ruleType === 'remove-section') {
+        const childSections = RuleManager.splitOnCombinedTargeting(strippedItems, childRule);
+        for (const childSec of childSections) {
+          if (childSec.match === null) {
+            el.appendChild(this._buildSectionEl(childSec, childRule, depth + 1));
+          } else {
+            const removedEl = document.createElement('div');
+            removedEl.className = 'dajb-preview-removed-section';
+            removedEl.title = 'This section and its body are removed from output';
+            const label = document.createElement('span');
+            label.className = 'dajb-preview-removed-label';
+            label.textContent = '✂ removed: ';
+            removedEl.appendChild(label);
+            this._appendItemSpans(removedEl, childSec.titleItems ?? []);
+            this._appendItemSpans(removedEl, childSec.bodyItems ?? [], { limit: 30 });
+            el.appendChild(removedEl);
+          }
         }
       } else if (childRule && childRule.ruleType === 'create-section' && (childRule.outputFormat?.additionalFormatting === 'ul' || childRule.outputFormat?.additionalFormatting === 'ol')) {
         // List mode: render matched sections as bullet items

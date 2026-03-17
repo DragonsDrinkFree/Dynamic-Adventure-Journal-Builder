@@ -117,7 +117,7 @@ export class JournalCreator {
       (c.pattern || c.fontSize != null || c.fontNameContains || c.fontColor)
     );
     const sectionChildren = children?.filter(c =>
-      (c.ruleType === 'create-section' || c.ruleType === 'create-collated-section') &&
+      (c.ruleType === 'create-section' || c.ruleType === 'create-collated-section' || c.ruleType === 'remove-section') &&
       !c.disabled &&
       (c.pattern || c.fontSize != null || c.fontNameContains || c.fontColor)
     ) ?? [];
@@ -227,6 +227,7 @@ export class JournalCreator {
         } else {
           // Plain section fires — flush open collate groups first
           await flushAll();
+          if (r.ruleType === 'remove-section') continue; // drop title + body entirely
           const rl  = +(r.outputFormat?.headingLevel ?? 3);
           const cPF = r.preserveFormatting ?? preserveFormatting;
           const sub = await JournalCreator._buildBodyHTML(sec.body, sec.bodyItems, r.children, pdfParser, parentRanges, journal, cPF);
@@ -253,6 +254,16 @@ export class JournalCreator {
       if (af === 'secret')     return `<section class="secret">${titleTag}${bodyHTML}</section>`;
       return bodyHTML;
     };
+
+    // Remove-section mode: matched sections (title + body) are dropped; preamble flows through.
+    if (primaryChild.ruleType === 'remove-section') {
+      let html = "";
+      for (const sec of sections) {
+        if (sec.match === null) html += renderBody(sec);
+        // matched sections are silently dropped
+      }
+      return html || (text ? `<p>${text}</p>` : "");
+    }
 
     // Collate mode: all matches are merged under a single user-defined heading.
     if (primaryChild.ruleType === 'create-collated-section') {

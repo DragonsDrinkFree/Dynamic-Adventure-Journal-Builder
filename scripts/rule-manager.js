@@ -13,7 +13,7 @@ export class RuleManager {
     return {
       id: foundry.utils.randomID(),
       name: "New Rule",
-      // "create-category" | "create-page" | "create-section" | "create-collated-section" | "strip"
+      // "create-category" | "create-page" | "create-section" | "create-collated-section" | "remove-section" | "strip"
       ruleType: "create-section",
       disabled: false,
       // top-level only
