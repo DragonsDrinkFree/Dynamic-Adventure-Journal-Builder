@@ -16,7 +16,25 @@
   "flags": {
     "canUpload": true
   },
-  "description": "Parse PDFs with regex rules and generate structured Foundry journal entries.",
-  "esmodules": ["scripts/main.js"],
-  "styles": ["styles/builder.css"]
+  "description": "<p>Parse PDFs with regex rules and generate structured Foundry journal entries.</p>",
+  "esmodules": [
+    "scripts/main.js"
+  ],
+  "styles": [
+    {
+      "src": "styles/builder.css"
+    }
+  ],
+  "packs": [
+    {
+      "name": "dynamic-journal-builder",
+      "label": "Dynamic Journal Builder",
+      "path": "packs/dynamic-journal-builder",
+      "type": "JournalEntry",
+      "ownership": {
+        "PLAYER": "OBSERVER",
+        "ASSISTANT": "OWNER"
+      }
+    }
+  ]
 }

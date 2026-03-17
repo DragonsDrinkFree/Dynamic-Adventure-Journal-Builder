@@ -50,6 +50,15 @@ async function getPdfjsLib() {
 }
 
 export class PDFParser {
+  /**
+   * Set to true from the browser console to enable column-detection diagnostics.
+   *   PDFParser.debugColumns = true;
+   * Then trigger a preview refresh — detailed logs appear in the console for
+   * every page processed, including the full x-histogram, gap candidate, and
+   * final split result.
+   */
+  static debugColumns = false;
+
   constructor() {
     /** @type {Object|null} PDF.js document proxy */
     this._doc = null;
@@ -251,20 +260,17 @@ export class PDFParser {
   /**
    * Return all structured text items across a set of page ranges.
    * @param {Array<{start:number, end:number}>} ranges
-   * @param {{ columnAware?: boolean }} [options]
    * @returns {Promise<Array<{text:string, fontSize:number, fontName:string, x:number, y:number}>>}
    */
-  async getPagesItems(ranges, { columnAware = false } = {}) {
+  async getPagesItems(ranges) {
     if (!this._doc) throw new Error("No PDF loaded");
     const all = [];
     for (const { start, end } of ranges) {
       for (let p = start; p <= Math.min(end, this._totalPages); p++) {
         const pageItems = await this.getPageItems(p);
-        if (columnAware) {
-          all.push(...PDFParser.reorderForColumns(pageItems, this.getPageWidth(p)));
-        } else {
-          all.push(...pageItems);
-        }
+        // Always apply column reordering — reorderForColumns is a no-op on
+        // single-column pages (returns items unchanged when no gap is detected).
+        all.push(...PDFParser.reorderForColumns(pageItems, this.getPageWidth(p)));
       }
     }
     return PDFParser.joinHyphenatedSplits(all);
@@ -332,18 +338,71 @@ export class PDFParser {
       hist[b]++;
     }
 
-    const avgDensity = items.length / BUCKETS;
-    const gapThreshold = avgDensity * 0.20;
-
-    // Look for a gap bucket whose centre falls in the middle 20–80 % of page width
-    let splitX = null;
+    // Find the bucket with the minimum item count in the central 25–75 % of page
+    // width — that is the most likely column gap.  Accept it as a real gap only
+    // when it is markedly emptier than the densest bucket on each flank
+    // (< 30 % of the smaller flank's max).  This avoids both false positives
+    // (margin dips inside a single column) and missed gaps (one sparse item
+    // crossing the gutter).
+    const midLo = pageWidth * 0.25;
+    const midHi = pageWidth * 0.75;
+    let bestBucket = -1;
+    let bestCount  = Infinity;
     for (let b = 0; b < BUCKETS; b++) {
-      const bucketCentreX = xMin + (b + 0.5) * bucketWidth;
-      if (bucketCentreX < pageWidth * 0.20 || bucketCentreX > pageWidth * 0.80) continue;
-      if (hist[b] < gapThreshold) { splitX = bucketCentreX; break; }
+      const centre = xMin + (b + 0.5) * bucketWidth;
+      if (centre < midLo || centre > midHi) continue;
+      if (hist[b] < bestCount) { bestCount = hist[b]; bestBucket = b; }
     }
 
-    if (splitX === null) return items; // no column gap detected
+    let splitX = null;
+    if (bestBucket >= 0) {
+      const leftMax  = bestBucket > 0              ? Math.max(...hist.slice(0, bestBucket))           : 0;
+      const rightMax = bestBucket < BUCKETS - 1    ? Math.max(...hist.slice(bestBucket + 1))          : 0;
+      // Both flanks must be dense enough to represent a real column.
+      // Stray running headers, page numbers, or end-of-line words on a single-
+      // column page produce rightMax of 1–2; genuine columns produce 5+.
+      const minFlankDensity = Math.max(4, items.length / BUCKETS * 0.5);
+      if (leftMax >= minFlankDensity && rightMax >= minFlankDensity &&
+          bestCount < Math.min(leftMax, rightMax) * 0.30) {
+        splitX = xMin + (bestBucket + 0.5) * bucketWidth;
+      }
+    }
+
+    if (PDFParser.debugColumns) {
+      const bucketCentres = hist.map((count, b) => {
+        const cx = xMin + (b + 0.5) * bucketWidth;
+        const inRange = cx >= midLo && cx <= midHi;
+        return `  b${b.toString().padStart(2)} x=${Math.round(cx).toString().padStart(4)}  n=${String(count).padStart(3)}${inRange ? ' *' : ''}`;
+      }).join('\n');
+      const gap = bestBucket >= 0 ? {
+        bucket: bestBucket,
+        centreX: Math.round(xMin + (bestBucket + 0.5) * bucketWidth),
+        count: bestCount,
+        leftMax:  bestBucket > 0           ? Math.max(...hist.slice(0, bestBucket))      : 0,
+        rightMax: bestBucket < BUCKETS - 1 ? Math.max(...hist.slice(bestBucket + 1))     : 0,
+      } : null;
+      console.groupCollapsed(
+        `DAJB columns | ${items.length} items | pageW=${Math.round(pageWidth)}pt | xRange=${Math.round(xMin)}–${Math.round(xMax)} | splitX=${splitX !== null ? Math.round(splitX) : 'none'}`
+      );
+      console.log('Histogram (* = in search range):');
+      console.log(bucketCentres);
+      if (gap) {
+        console.log(`Gap candidate: bucket ${gap.bucket} centreX=${gap.centreX}  count=${gap.count}  leftMax=${gap.leftMax}  rightMax=${gap.rightMax}  threshold=${Math.round(Math.min(gap.leftMax, gap.rightMax) * 0.30)}`);
+      }
+      console.log(splitX !== null ? `✓ Columns detected, splitX=${Math.round(splitX)}` : '✗ No column gap — Y-sorted single column');
+      {
+        const preview = [...items].sort((a, b) => {
+          if (splitX !== null) {
+            const aLeft = a.x < splitX; const bLeft = b.x < splitX;
+            if (aLeft !== bLeft) return aLeft ? -1 : 1;
+          }
+          return b.y - a.y;
+        }).slice(0, 30).map(i => `  x=${Math.round(i.x).toString().padStart(4)}  y=${Math.round(i.y).toString().padStart(4)}  ${i.text.slice(0, 60)}`);
+        console.log('First 30 items in output order (x | y | text):');
+        console.log(preview.join('\n'));
+      }
+      console.groupEnd();
+    }
 
     const Y_TOL = 2; // pt — items within this Y range are on the same line
 
@@ -364,39 +423,43 @@ export class PDFParser {
       return result;
     };
 
-    // Group all items into visual Y-lines, then separate spanning items
-    // (those with content on BOTH sides of the column gap) from column items.
-    // Spanning items — e.g. a full-width chapter title — are output first in
-    // their natural Y order so they appear before either column's text.
-    const allSorted = [...items].sort((a, b) => b.y - a.y || a.x - b.x);
-    const yLines = [];
-    let curLine = null;
-    for (const item of allSorted) {
-      if (!curLine || Math.abs(item.y - curLine[0].y) > Y_TOL) {
-        curLine = [item];
-        yLines.push(curLine);
-      } else {
-        curLine.push(item);
-      }
+    // No two-column gap: sort by Y (top-to-bottom) for consistent ordering.
+    // Raw PDF item order is not guaranteed to match reading order, so we always
+    // normalise rather than returning items as-is.
+    if (splitX === null) return sortColumn([...items]);
+
+    // Assign each item to its column purely by x position.
+    // Do NOT use y-line spanning detection — parallel column content at the
+    // same Y would be misclassified as a "spanning header" and incorrectly
+    // hoisted to the top of output.  True full-width headers start from the
+    // left margin (x < splitX) and will naturally sort to the top of the left
+    // column via the Y-descending sort inside sortColumn.
+    const leftItems  = [];
+    const rightItems = [];
+    for (const item of items) {
+      if (item.x >= splitX) rightItems.push(item);
+      else                  leftItems.push(item);
     }
 
-    const spanningItems = [];
-    const leftItems     = [];
-    const rightItems    = [];
-    for (const line of yLines) {
-      const hasLeft  = line.some(i => i.x <  splitX);
-      const hasRight = line.some(i => i.x >= splitX);
-      if (hasLeft && hasRight) {
-        // Spanning line: keep left-to-right reading order within the line
-        spanningItems.push(...line.sort((a, b) => a.x - b.x));
-      } else if (hasRight) {
-        rightItems.push(...line);
-      } else {
-        leftItems.push(...line);
-      }
+    const finalLeft  = sortColumn(leftItems);
+    const finalRight = sortColumn(rightItems);
+    const finalOut   = [...finalLeft, ...finalRight];
+
+    if (PDFParser.debugColumns) {
+      const fmt = arr => arr.slice(0, 15).map(i =>
+        `  x=${Math.round(i.x).toString().padStart(4)}  y=${Math.round(i.y).toString().padStart(4)}  ${i.text.slice(0, 60)}`
+      ).join('\n');
+      console.groupCollapsed(`DAJB split detail | left=${finalLeft.length} right=${finalRight.length}`);
+      console.log('── LEFT (first 15 in output order):');
+      console.log(fmt(finalLeft));
+      console.log('── RIGHT (first 15 in output order):');
+      console.log(fmt(finalRight));
+      console.log('── FINAL OUTPUT (first 30):');
+      console.log(fmt(finalOut));
+      console.groupEnd();
     }
 
-    return [...spanningItems, ...sortColumn(leftItems), ...sortColumn(rightItems)];
+    return finalOut;
   }
 
   /**

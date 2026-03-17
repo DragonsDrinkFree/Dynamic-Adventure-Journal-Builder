@@ -7,6 +7,9 @@ import { JournalCreator } from "./journal-creator.js";
 
 Hooks.once("init", () => {
   console.log("Dynamic Adventure Journal Builder | Initialising…");
+  // Expose classes on the global DAJB namespace so they're reachable from the
+  // browser console for debugging (e.g. DAJB.PDFParser.debugColumns = true).
+  globalThis.DAJB = { PDFParser, RuleManager, JournalCreator, BuilderApp };
 });
 
 // ── Journal sidebar button ─────────────────────────────────────────────────
