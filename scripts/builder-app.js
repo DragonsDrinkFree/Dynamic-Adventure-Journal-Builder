@@ -578,9 +578,78 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         el.appendChild(indicator);
       }
 
-      // 2. Find first boundary child and split the (now stripped) body
-      const childRule = rule.children?.find(c => c.ruleType !== 'strip' && (c.pattern || c.fontSize != null || c.fontNameContains || c.fontColor));
-      if (childRule && childRule.ruleType === 'create-section' && childRule.groupName) {
+      // 2. Find all qualifying create-section children; use multi-child mode when >1
+      const sectionChildRules = rule.children?.filter(c =>
+        c.ruleType === 'create-section' && (c.pattern || c.fontSize != null || c.fontNameContains || c.fontColor)
+      ) ?? [];
+      const childRule = sectionChildRules[0] ?? null;
+
+      if (sectionChildRules.length > 1) {
+        // Multi-child mode: boundaries from all rules merged in position order
+        const tagged = RuleManager.splitOnMultipleRules(strippedItems, sectionChildRules);
+        const pendingCollate = new Map(); // rule → [sections]
+
+        const flushCollate = () => {
+          for (const [cr, secs] of pendingCollate) {
+            if (!secs.length) continue;
+            const level = +(cr.outputFormat?.headingLevel ?? 2);
+            const groupEl = document.createElement('div');
+            groupEl.className = 'dajb-preview-collate-group';
+            if (level > 0) {
+              const hdr = document.createElement(`h${level}`);
+              hdr.className = 'dajb-preview-collate-heading';
+              hdr.textContent = cr.groupName;
+              groupEl.appendChild(hdr);
+            }
+            const hasGC = cr.children?.some(c => c.ruleType !== 'strip');
+            if (hasGC) {
+              for (const s of secs) groupEl.appendChild(this._buildSectionEl(s, cr, depth + 1));
+            } else {
+              const asList = cr.outputFormat?.asList ?? false;
+              const listType = cr.outputFormat?.listType ?? 'ul';
+              const contentEl = document.createElement(asList ? listType : 'p');
+              contentEl.className = 'dajb-preview-collate-body';
+              for (const s of secs) {
+                if (asList) {
+                  const li = document.createElement('li');
+                  const strong = document.createElement('strong');
+                  strong.textContent = s.title;
+                  li.appendChild(strong);
+                  if (s.body) li.appendChild(document.createTextNode(' ' + s.body.slice(0, 100) + (s.body.length > 100 ? '…' : '')));
+                  contentEl.appendChild(li);
+                } else {
+                  contentEl.appendChild(document.createTextNode((s.title + (s.body ? ' ' + s.body : '') + ' ').slice(0, 120)));
+                }
+              }
+              groupEl.appendChild(contentEl);
+            }
+            const badge = document.createElement('span');
+            badge.className = 'dajb-preview-collate-badge';
+            badge.textContent = `${secs.length} match${secs.length !== 1 ? 'es' : ''} collated`;
+            groupEl.appendChild(badge);
+            el.appendChild(groupEl);
+          }
+          pendingCollate.clear();
+        };
+
+        for (const sec of tagged) {
+          if (sec.match === null) {
+            flushCollate();
+            if (sec.body) el.appendChild(this._buildSectionEl(sec, { children: [] }, depth + 1));
+            continue;
+          }
+          const r = sec.rule;
+          if (r.groupName) {
+            if (!pendingCollate.has(r)) pendingCollate.set(r, []);
+            pendingCollate.get(r).push(sec);
+          } else {
+            flushCollate();
+            el.appendChild(this._buildSectionEl(sec, r, depth + 1));
+          }
+        }
+        flushCollate();
+
+      } else if (childRule && childRule.ruleType === 'create-section' && childRule.groupName) {
         // Collate mode: all matches merged under one named heading.
         // Each match's body is still passed through any grandchild rules.
         const childSections = RuleManager.splitOnCombinedTargeting(strippedItems, childRule);

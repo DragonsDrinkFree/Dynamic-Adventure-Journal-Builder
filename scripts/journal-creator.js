@@ -106,13 +106,23 @@ export class JournalCreator {
   static async _buildBodyHTML(text, bodyItems, children, pdfParser, parentRanges, journal = null, preserveFormatting = false) {
     if (!text && !bodyItems?.length) return "";
 
-    // Apply strip rules first, then find the primary boundary child
+    // Apply strip rules first, then find all qualifying boundary children
     const cleanedItems = RuleManager.stripContent(bodyItems ?? [], children);
 
-    const primaryChild = children?.find(c =>
-      (c.ruleType === 'create-page' || c.ruleType === 'create-section') &&
+    // Helper: strip a single wrapping <p>…</p> so content can flow inline
+    const stripP = s => s ? s.replace(/^<p>([\s\S]*)<\/p>$/i, '$1').trim() : '';
+
+    const pageChild = children?.find(c =>
+      c.ruleType === 'create-page' &&
       (c.pattern || c.fontSize != null || c.fontNameContains || c.fontColor)
     );
+    const sectionChildren = children?.filter(c =>
+      c.ruleType === 'create-section' &&
+      (c.pattern || c.fontSize != null || c.fontNameContains || c.fontColor)
+    ) ?? [];
+
+    const primaryChild = pageChild ?? sectionChildren[0] ?? null;
+
     if (!primaryChild) {
       // No child rule — render body as final content
       if (preserveFormatting && cleanedItems.length) {
@@ -156,6 +166,75 @@ export class JournalCreator {
         await journal.createEmbeddedDocuments("JournalEntryPage", [pageData]);
       }
       return "";
+    }
+
+    // ── Multi-child section cooperation ──────────────────────────────────────
+    // When multiple create-section children exist at the same level, combine their
+    // boundaries into one pass.  Collate-group children (groupName set) accumulate
+    // matches until a plain-section child fires, at which point their group is
+    // flushed before the heading is written.
+    if (sectionChildren.length > 1) {
+      const tagged = RuleManager.splitOnMultipleRules(cleanedItems, sectionChildren);
+
+      // Render and flush a pending collate group for one rule
+      const renderCollate = async (rule, secs) => {
+        if (!secs.length) return '';
+        const rl    = +(rule.outputFormat?.headingLevel ?? 2);
+        const al    = rule.outputFormat?.asList ?? false;
+        const lt    = rule.outputFormat?.listType ?? 'ul';
+        const hasGC = rule.children?.some(c => c.ruleType !== 'strip');
+        const cPF   = rule.preserveFormatting ?? preserveFormatting;
+        const titleHTML = rl > 0 ? `<h${rl}>${rule.groupName}</h${rl}>` : '';
+        const parts = [];
+        for (const s of secs) {
+          const sub = await JournalCreator._buildBodyHTML(s.body, s.bodyItems, rule.children, pdfParser, parentRanges, journal, cPF);
+          const body = sub || (s.body ? `<p>${s.body}</p>` : '');
+          const tp = s.title ? `<strong>${s.title}</strong>` : '';
+          if (al) {
+            const bi = hasGC ? body : stripP(body);
+            parts.push(`<li>${tp}${bi ? ' ' + bi : ''}</li>`);
+          } else if (hasGC) {
+            parts.push((tp ? `<p>${tp}</p>` : '') + body);
+          } else {
+            const bi = stripP(body);
+            parts.push(tp + (bi ? ' ' + bi : ''));
+          }
+        }
+        if (al)       return titleHTML + `<${lt}>${parts.join('')}</${lt}>`;
+        if (hasGC)    return titleHTML + parts.join('');
+        return titleHTML + `<p>${parts.join(' ')}</p>`;
+      };
+
+      let html = '';
+      const pending = new Map(); // rule → accumulated sections
+
+      const flushAll = async () => {
+        for (const [rule, secs] of pending) html += await renderCollate(rule, secs);
+        pending.clear();
+      };
+
+      for (const sec of tagged) {
+        if (sec.match === null) {
+          await flushAll();
+          if (sec.body) html += `<p>${sec.body}</p>`;
+          continue;
+        }
+        const r = sec.rule;
+        if (r.groupName) {
+          if (!pending.has(r)) pending.set(r, []);
+          pending.get(r).push(sec);
+        } else {
+          // Plain section fires — flush open collate groups first
+          await flushAll();
+          const rl  = +(r.outputFormat?.headingLevel ?? 3);
+          const cPF = r.preserveFormatting ?? preserveFormatting;
+          const sub = await JournalCreator._buildBodyHTML(sec.body, sec.bodyItems, r.children, pdfParser, parentRanges, journal, cPF);
+          const body = sub || (sec.body ? `<p>${sec.body}</p>` : '');
+          html += rl === 0 ? body : `<h${rl}>${sec.title}</h${rl}>` + body;
+        }
+      }
+      await flushAll();
+      return html || (text ? `<p>${text}</p>` : '');
     }
 
     // create-section child: each match becomes an inline heading or list item

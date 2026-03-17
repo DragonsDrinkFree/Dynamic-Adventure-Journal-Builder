@@ -54,7 +54,9 @@ export class RuleManager {
 
   /** Create a new rule. If parentId is supplied it becomes a child rule. */
   createRule(parentId = null) {
-    const rule = this._makeRule();
+    let hasPageRule = false;
+    this._walk(this.rules, (r) => { if (r.ruleType === 'create-page') hasPageRule = true; });
+    const rule = this._makeRule({ ruleType: hasPageRule ? 'create-section' : 'create-page' });
     if (parentId === null) {
       this.rules.push(rule);
     } else {
@@ -498,6 +500,92 @@ export class RuleManager {
     }
 
     return sections;
+  }
+
+  /**
+   * Split items cooperatively across multiple child rules.
+   * Each child rule contributes its own boundaries; all boundaries are merged by
+   * position and deduplicated (earlier boundary wins on overlap).  Each returned
+   * section is tagged with the child rule that owns its boundary so the caller
+   * can render it appropriately (e.g. flush a collate group when a plain section fires).
+   *
+   * Returns Array<{ match, title, titleItems, body, bodyItems, rule: childRule|null }>
+   * where rule===null means a preamble/gap segment claimed by no rule.
+   */
+  static splitOnMultipleRules(items, childRules) {
+    if (!items?.length || !childRules?.length) return [];
+
+    // Map each item object → its index for O(1) lookup
+    const itemToIdx = new Map(items.map((item, i) => [item, i]));
+
+    // Collect all boundaries from all child rules, tagged with the source rule
+    const allBoundaries = [];
+    for (const rule of childRules) {
+      const sections = RuleManager.splitOnCombinedTargeting(items, rule);
+      for (const sec of sections) {
+        if (sec.match === null || !sec.titleItems?.length) continue;
+        const firstIdx = itemToIdx.get(sec.titleItems[0]);
+        if (firstIdx === undefined) continue;
+        const lastIdx = itemToIdx.get(sec.titleItems[sec.titleItems.length - 1]) ?? firstIdx;
+        allBoundaries.push({ itemStart: firstIdx, itemEnd: lastIdx + 1, title: sec.title, titleItems: sec.titleItems, rule });
+      }
+    }
+
+    if (!allBoundaries.length) {
+      const body = items.map(i => i.text).join(' ').trim();
+      return body ? [{ match: null, title: null, body, bodyItems: items, rule: null }] : [];
+    }
+
+    // Sort by position; first boundary wins on overlap
+    allBoundaries.sort((a, b) => a.itemStart - b.itemStart);
+    const merged = [];
+    let lastEnd = 0;
+    for (const b of allBoundaries) {
+      if (b.itemStart >= lastEnd) { merged.push(b); lastEnd = b.itemEnd; }
+    }
+
+    // Plain-section boundaries "own" all items from their end to the next plain
+    // section's start.  Any collate-rule boundaries that land inside that owned
+    // span are removed so those items become body text of the plain section
+    // instead of spawning a new collate group.
+    for (let i = 0; i < merged.length; i++) {
+      if (merged[i].rule?.groupName) continue; // only plain sections claim body
+      // Find where this plain section's ownership ends (next plain section start)
+      let nextPlainStart = items.length;
+      for (let k = i + 1; k < merged.length; k++) {
+        if (!merged[k].rule?.groupName) { nextPlainStart = merged[k].itemStart; break; }
+      }
+      const bodyStart = merged[i].itemEnd;
+      // Remove collate boundaries whose start falls inside [bodyStart, nextPlainStart)
+      let j = i + 1;
+      while (j < merged.length) {
+        if (merged[j].rule?.groupName &&
+            merged[j].itemStart >= bodyStart &&
+            merged[j].itemStart < nextPlainStart) {
+          merged.splice(j, 1);
+        } else {
+          j++;
+        }
+      }
+    }
+
+    const toText = (arr) => arr.map(i => i.text).join(' ').trim();
+    const result = [];
+
+    // Preamble before first boundary
+    if (merged[0].itemStart > 0) {
+      const bodyItems = items.slice(0, merged[0].itemStart);
+      result.push({ match: null, title: null, body: toText(bodyItems), bodyItems, rule: null });
+    }
+
+    for (let i = 0; i < merged.length; i++) {
+      const b = merged[i];
+      const next = merged[i + 1];
+      const bodyItems = items.slice(b.itemEnd, next ? next.itemStart : items.length);
+      result.push({ match: b, title: b.title, titleItems: b.titleItems, body: toText(bodyItems), bodyItems, rule: b.rule });
+    }
+
+    return result;
   }
 
   /**
