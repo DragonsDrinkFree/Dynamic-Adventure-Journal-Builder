@@ -302,13 +302,18 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         </label>
         ` : ""}
 
-        ${!isStrip ? `
+        ${isCat ? `
         <label class="dajb-field">
-          <span>${isCat ? "Category Name" : "Target Category"}</span>
-          <input type="text" data-field="targetCategory" value="${this._esc(rule.targetCategory)}"
-            placeholder="${isCat ? "Name of category to create" : "Category to place items into"}" />
+          <span>Category Name</span>
+          <input type="text" data-field="targetCategory" value="${this._esc(rule.targetCategory)}" placeholder="Name of category to create" />
         </label>
-        ${isCat ? `<em class="dajb-hint" style="color:#7ec8e3;padding:0 4px 8px">Place this rule above any Create Page rules that use this category.</em>` : ""}
+        <em class="dajb-hint" style="color:#7ec8e3;padding:0 4px 8px">Place this rule above any Create Page rules that use this category.</em>
+        ` : ""}
+        ${isPage ? `
+        <label class="dajb-field">
+          <span>Target Category</span>
+          <input type="text" data-field="targetCategory" value="${this._esc(rule.targetCategory)}" placeholder="Category to place pages into" />
+        </label>
         ` : ""}
 
         ${isStrip ? `<em class="dajb-hint dajb-strip-hint">Matched text is removed before boundary rules run.</em>` : ""}
@@ -318,17 +323,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
         ${hasOutput ? `
         <fieldset class="dajb-fieldset">
-          <legend>Output</legend>
-          <label class="dajb-field">
-            <span>Template</span>
-            <textarea data-field="outputTemplate" rows="2" class="dajb-monospace">${this._esc(rule.outputTemplate)}</textarea>
-          </label>
-          <em class="dajb-hint">{{match}}, {{group1}}, {{group2}}, …</em>
-          <label class="dajb-field dajb-field-check">
-            <input type="checkbox" data-field="preserveFormatting" ${rule.preserveFormatting ? "checked" : ""} />
-            <span>Preserve bold / italic from PDF</span>
-          </label>
-          <em class="dajb-hint">Detected from font name (e.g. "Bold", "Italic"). Underline is not available from PDF text data.</em>
+          <legend>Output Formatting</legend>
           ${(isSection || isCollated) ? `
           ${isCollated ? `
           <label class="dajb-field">
@@ -344,15 +339,15 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
               ${[1,2,3,4,5,6].map(n => `<option value="${n}"${fmt.headingLevel === n ? ' selected' : ''}>H${n}</option>`).join("")}
             </select>
           </label>
-          <label class="dajb-field dajb-field-check">
-            <input type="checkbox" data-field="outputFormat.asList" ${fmt.asList ? "checked" : ""} />
-            <span>Wrap in list</span>
-          </label>
           <label class="dajb-field">
-            <span>List Type</span>
-            <select data-field="outputFormat.listType">
-              <option value="ul"${fmt.listType === "ul" ? ' selected' : ''}>Unordered (ul)</option>
-              <option value="ol"${fmt.listType === "ol" ? ' selected' : ''}>Ordered (ol)</option>
+            <span>Additional Formatting</span>
+            <select data-field="outputFormat.additionalFormatting">
+              <option value=""${(fmt.additionalFormatting ?? '') === '' ? ' selected' : ''}>(none)</option>
+              <option value="ul"${fmt.additionalFormatting === 'ul' ? ' selected' : ''}>List, Unordered</option>
+              <option value="ol"${fmt.additionalFormatting === 'ol' ? ' selected' : ''}>List, Ordered</option>
+              <option value="blockquote"${fmt.additionalFormatting === 'blockquote' ? ' selected' : ''}>Block Quote</option>
+              <option value="pre"${fmt.additionalFormatting === 'pre' ? ' selected' : ''}>Code Block</option>
+              <option value="secret"${fmt.additionalFormatting === 'secret' ? ' selected' : ''}>Secret</option>
             </select>
           </label>
           <label class="dajb-field dajb-field-check">
@@ -361,6 +356,11 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           </label>
           <em class="dajb-hint">Ignores matches that don't follow a sentence-ending character. Prevents mid-sentence bold text from splitting into its own section.</em>
           ` : ""}
+          <label class="dajb-field dajb-field-check">
+            <input type="checkbox" data-field="preserveFormatting" ${rule.preserveFormatting ? "checked" : ""} />
+            <span>Preserve bold / italic from PDF</span>
+          </label>
+          <em class="dajb-hint">Detected from font name (e.g. "Bold", "Italic").</em>
         </fieldset>
         ` : ""}
       </div>
@@ -415,7 +415,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     // so typing doesn't steal focus by re-rendering on every character.
     if (["pattern", "flags", "pageRanges", "captureGroup", "fontSize", "fontNameContains", "fontColor",
          "groupName", "breakOnSentence",
-         "outputFormat.headingLevel", "outputFormat.asList", "outputFormat.listType"].includes(field)) {
+         "outputFormat.headingLevel", "outputFormat.additionalFormatting"].includes(field)) {
       const isTextInput = ["pattern", "flags", "pageRanges", "fontNameContains", "fontColor", "groupName"].includes(field);
       this._schedulePreviewRefresh(!isTextInput);
     }
@@ -630,15 +630,15 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             if (hasGC) {
               for (const s of secs) groupEl.appendChild(this._buildSectionEl(s, cr, depth + 1));
             } else {
-              const asList = cr.outputFormat?.asList ?? false;
-              const listType = cr.outputFormat?.listType ?? 'ul';
-              const contentEl = document.createElement(asList ? listType : 'p');
+              const crAF   = cr.outputFormat?.additionalFormatting ?? '';
+              const isList = crAF === 'ul' || crAF === 'ol';
+              const contentEl = document.createElement(isList ? crAF : 'p');
               contentEl.className = 'dajb-preview-collate-body';
               for (const s of secs) {
-                const container = asList ? document.createElement('li') : contentEl;
+                const container = isList ? document.createElement('li') : contentEl;
                 this._appendItemSpans(container, s.titleItems ?? [], { bold: true });
                 this._appendItemSpans(container, s.bodyItems ?? []);
-                if (asList) contentEl.appendChild(container);
+                if (isList) contentEl.appendChild(container);
               }
               groupEl.appendChild(contentEl);
             }
@@ -712,10 +712,10 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           groupEl.appendChild(badge);
           el.appendChild(groupEl);
         }
-      } else if (childRule && childRule.ruleType === 'create-section' && childRule.outputFormat?.asList) {
+      } else if (childRule && childRule.ruleType === 'create-section' && (childRule.outputFormat?.additionalFormatting === 'ul' || childRule.outputFormat?.additionalFormatting === 'ol')) {
         // List mode: render matched sections as bullet items
         const childSections = RuleManager.splitOnCombinedTargeting(strippedItems, childRule);
-        const listType = childRule.outputFormat?.listType ?? 'ul';
+        const listType = childRule.outputFormat?.additionalFormatting ?? 'ul';
         const listEl = document.createElement(listType);
         listEl.className = 'dajb-preview-section-list';
         let hasItems = false;

@@ -35,8 +35,7 @@ export class RuleManager {
       groupName: "",          // if non-empty: all matches are collated under this single heading
       outputFormat: {
         headingLevel: 2,
-        asList: false,
-        listType: "ul",
+        additionalFormatting: "", // "" | "ul" | "ol" | "blockquote" | "pre" | "secret"
       },
       children: [],
       ...overrides,
@@ -183,13 +182,21 @@ export class RuleManager {
     if (!Array.isArray(data.rules))
       throw new Error('JSON must have a top-level "rules" array');
     this.rules = data.rules;
-    // Migrate old minFontSize/maxFontSize schema to exact fontSize
     this._walk(this.rules, (rule) => {
+      // Migrate old minFontSize/maxFontSize schema to exact fontSize
       if (rule.fontSize === undefined && (rule.minFontSize != null || rule.maxFontSize != null)) {
         rule.fontSize = rule.minFontSize ?? rule.maxFontSize;
       }
       delete rule.minFontSize;
       delete rule.maxFontSize;
+      // Migrate asList/listType → additionalFormatting
+      if (rule.outputFormat && rule.outputFormat.additionalFormatting === undefined) {
+        rule.outputFormat.additionalFormatting = rule.outputFormat.asList
+          ? (rule.outputFormat.listType ?? 'ul')
+          : '';
+        delete rule.outputFormat.asList;
+        delete rule.outputFormat.listType;
+      }
     });
   }
 
