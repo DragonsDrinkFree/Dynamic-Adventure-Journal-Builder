@@ -112,6 +112,8 @@ export class JournalCreator {
     // Helper: strip a single wrapping <p>…</p> so content can flow inline
     const stripP = s => s ? s.replace(/^<p>([\s\S]*)<\/p>$/i, '$1').trim() : '';
 
+    const tableChild = children?.find(c => c.ruleType === 'create-table' && !c.disabled) ?? null;
+
     const pageChild = children?.find(c =>
       c.ruleType === 'create-page' && !c.disabled &&
       (c.pattern || c.fontSize != null || c.fontNameContains || c.fontColor)
@@ -123,6 +125,37 @@ export class JournalCreator {
     ) ?? [];
 
     const primaryChild = pageChild ?? sectionChildren[0] ?? null;
+
+    // create-table child: parse body items geometrically into an HTML table.
+    // If the table rule has font/regex targeting, use it to locate where the
+    // table starts — items before the first match are emitted as preamble prose.
+    if (tableChild && !primaryChild) {
+      if (!cleanedItems.length) return '';
+      const tableOpts = {
+        firstRowHeader:     tableChild.firstRowHeader ?? true,
+        columnGapMinPt:     tableChild.columnGapMinPt ?? 4,
+        preserveFormatting: tableChild.preserveFormatting ?? preserveFormatting,
+      };
+      const hasCriteria = !!(tableChild.pattern || tableChild.fontSize != null ||
+                             tableChild.fontNameContains || tableChild.fontColor);
+      if (hasCriteria) {
+        const sections = RuleManager.splitOnCombinedTargeting(cleanedItems, tableChild);
+        let preambleHTML = '';
+        const tableItems = [];
+        for (const sec of sections) {
+          if (sec.match === null) {
+            if (sec.body) preambleHTML += `<p>${sec.body}</p>`;
+          } else {
+            tableItems.push(...(sec.titleItems ?? []), ...(sec.bodyItems ?? []));
+          }
+        }
+        if (!tableItems.length) return preambleHTML || (text ? `<p>${text}</p>` : '');
+        const { html } = PDFParser.parseTableRegion(tableItems, tableOpts);
+        return preambleHTML + (html || '');
+      }
+      const { html } = PDFParser.parseTableRegion(cleanedItems, tableOpts);
+      return html || (text ? `<p>${text}</p>` : '');
+    }
 
     if (!primaryChild) {
       // No child rule — render body as final content

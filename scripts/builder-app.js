@@ -122,7 +122,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     label.className = "dajb-rule-label";
     label.dataset.action = "select-rule";
     label.dataset.ruleId = rule.id;
-    const typeInfo = { "create-category": ["cat","#7ec8e3"], "create-page": ["page","#9ade9a"], "strip": ["strip","#e07878"], "create-collated-section": ["collate","#e8a838"], "remove-section": ["remove","#c87878"] };
+    const typeInfo = { "create-category": ["cat","#7ec8e3"], "create-page": ["page","#9ade9a"], "strip": ["strip","#e07878"], "create-collated-section": ["collate","#e8a838"], "remove-section": ["remove","#c87878"], "create-table": ["table","#a78bfa"] };
     const ti = typeInfo[rule.ruleType];
     if (ti) {
       const badge = document.createElement("span");
@@ -217,12 +217,14 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     const isCollated  = type === 'create-collated-section';
     const isRemove    = type === 'remove-section';
     const isStrip     = type === 'strip';
+    const isTable     = type === 'create-table';
     const hasTargeting = !isCat;
     const hasOutput    = isPage || isSection || isCollated;
 
     const headerClass = isCat ? 'category-header' : (isStrip || isRemove) ? 'strip-header' : '';
     const canHaveChildren = isPage || isSection || isCollated;
 
+    const hasAdvancedFontSize = rule.minFontSize != null || rule.maxFontSize != null;
     const fontTargetingFields = `
       <fieldset class="dajb-fieldset">
         <legend>Font Targeting</legend>
@@ -230,6 +232,20 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           <span>Font Size (pt)</span>
           <input type="number" data-field="fontSize" value="${rule.fontSize ?? ""}" min="0" step="0.5" placeholder="Any" style="width:80px" />
         </label>
+        <details class="dajb-advanced-details"${hasAdvancedFontSize ? ' open' : ''}>
+          <summary class="dajb-advanced-summary">Advanced Font Size</summary>
+          <div class="dajb-advanced-content">
+            <em class="dajb-hint">Match a size range instead of (or in addition to) the exact value above.</em>
+            <label class="dajb-field">
+              <span>Min Font Size (pt)</span>
+              <input type="number" data-field="minFontSize" value="${rule.minFontSize ?? ""}" min="0" step="0.5" placeholder="Any" style="width:80px" />
+            </label>
+            <label class="dajb-field">
+              <span>Max Font Size (pt)</span>
+              <input type="number" data-field="maxFontSize" value="${rule.maxFontSize ?? ""}" min="0" step="0.5" placeholder="Any" style="width:80px" />
+            </label>
+          </div>
+        </details>
         <label class="dajb-field">
           <span>Font Name Contains</span>
           <input type="text" data-field="fontNameContains" value="${this._esc(rule.fontNameContains ?? '')}" placeholder="e.g. Bold, Garamond" />
@@ -287,6 +303,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             <option value="create-section"          ${isSection  ? "selected" : ""}>New Section</option>
             <option value="create-collated-section" ${isCollated ? "selected" : ""}>New Collated Section</option>
             <option value="remove-section"          ${isRemove   ? "selected" : ""}>Remove Section</option>
+            <option value="create-table"            ${isTable    ? "selected" : ""}>Table</option>
             <option value="strip"                   ${isStrip    ? "selected" : ""}>Remove Text</option>
           </select>
         </label>
@@ -320,6 +337,26 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
         ${isStrip  ? `<em class="dajb-hint dajb-strip-hint">Matched text is removed before boundary rules run.</em>` : ""}
         ${isRemove ? `<em class="dajb-hint dajb-strip-hint">Matched section boundaries and their entire body are removed from the output.</em>` : ""}
+        ${isTable  ? `
+        <fieldset class="dajb-fieldset">
+          <legend>Table Options</legend>
+          <label class="dajb-field dajb-field-check">
+            <input type="checkbox" data-field="firstRowHeader" ${rule.firstRowHeader !== false ? "checked" : ""} />
+            <span>First row is header</span>
+          </label>
+          <em class="dajb-hint">Wraps the first row in &lt;thead&gt; with &lt;th&gt; cells.</em>
+          <label class="dajb-field">
+            <span>Column gap threshold (pt)</span>
+            <input type="number" data-field="columnGapMinPt" value="${rule.columnGapMinPt ?? 4}" min="1" step="0.5" style="width:70px" />
+          </label>
+          <em class="dajb-hint">Minimum x-gap between text runs to detect a column boundary. Increase if columns are merging; decrease if too many columns appear.</em>
+          <label class="dajb-field dajb-field-check">
+            <input type="checkbox" data-field="preserveFormatting" ${rule.preserveFormatting ? "checked" : ""} />
+            <span>Preserve bold / italic in cells</span>
+          </label>
+        </fieldset>
+        <em class="dajb-hint dajb-strip-hint">Geometrically parses body items into rows and columns using x/y positions from the PDF.</em>
+        ` : ""}
 
         ${hasTargeting ? fontTargetingFields : ""}
         ${hasTargeting ? regexFields : ""}
@@ -379,7 +416,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       value = el.checked;
     } else if (el.type === "number") {
       // nullable number fields: empty string means "no filter"
-      const nullable = ["fontSize", "xMin", "xMax"].includes(field);
+      const nullable = ["fontSize", "minFontSize", "maxFontSize", "xMin", "xMax"].includes(field);
       value = (nullable && el.value === "") ? null : Number(el.value);
     } else if (el.tagName === "SELECT" && field === "outputFormat.headingLevel") {
       value = Number(el.value);
@@ -416,9 +453,10 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
     // Refresh preview on targeting-related changes — debounced for text fields
     // so typing doesn't steal focus by re-rendering on every character.
-    if (["pattern", "flags", "pageRanges", "captureGroup", "fontSize", "fontNameContains", "fontColor",
-         "groupName", "breakOnSentence",
-         "outputFormat.headingLevel", "outputFormat.additionalFormatting"].includes(field)) {
+    if (["pattern", "flags", "pageRanges", "captureGroup", "fontSize", "minFontSize", "maxFontSize",
+         "fontNameContains", "fontColor", "groupName", "breakOnSentence",
+         "outputFormat.headingLevel", "outputFormat.additionalFormatting",
+         "firstRowHeader", "columnGapMinPt"].includes(field)) {
       const isTextInput = ["pattern", "flags", "pageRanges", "fontNameContains", "fontColor", "groupName"].includes(field);
       this._schedulePreviewRefresh(!isTextInput);
     }
@@ -776,6 +814,42 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           hasItems = true;
         }
         if (hasItems) el.appendChild(listEl);
+      } else if (childRule && childRule.ruleType === 'create-table') {
+        // Table mode: geometrically parse body items into an HTML table preview.
+        // If the table rule has targeting, use it to split preamble from table items.
+        const tableChild = childRule;
+        const tableOpts = {
+          firstRowHeader:     tableChild.firstRowHeader ?? true,
+          columnGapMinPt:     tableChild.columnGapMinPt ?? 4,
+          preserveFormatting: tableChild.preserveFormatting ?? false,
+        };
+        const hasCriteria = !!(tableChild.pattern || tableChild.fontSize != null ||
+                               tableChild.fontNameContains || tableChild.fontColor);
+        let tableItems = strippedItems;
+        if (hasCriteria && strippedItems.length) {
+          const sections = RuleManager.splitOnCombinedTargeting(strippedItems, tableChild);
+          const preamble = sections.find(s => s.match === null);
+          if (preamble?.bodyItems?.length) {
+            const pre = document.createElement('div');
+            pre.className = 'dajb-preview-body-text';
+            this._appendItemSpans(pre, preamble.bodyItems, { limit: 100 });
+            el.appendChild(pre);
+          }
+          tableItems = sections
+            .filter(s => s.match !== null)
+            .flatMap(s => [...(s.titleItems ?? []), ...(s.bodyItems ?? [])]);
+        }
+        if (tableItems.length) {
+          const { html, rowCount, colCount } = PDFParser.parseTableRegion(tableItems, tableOpts);
+          const wrapper = document.createElement('div');
+          wrapper.className = 'dajb-preview-table-wrapper';
+          wrapper.innerHTML = html;
+          const badge = document.createElement('div');
+          badge.className = 'dajb-preview-table-badge';
+          badge.textContent = `${rowCount} rows × ${colCount} col${colCount !== 1 ? 's' : ''} (table)`;
+          wrapper.appendChild(badge);
+          el.appendChild(wrapper);
+        }
       } else if (childRule) {
         const childSections = RuleManager.splitOnCombinedTargeting(strippedItems, childRule);
         for (const childSec of childSections) {

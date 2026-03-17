@@ -308,6 +308,35 @@
   gap: 6px;
 }
 
+/* Advanced font size toggle */
+.dajb-advanced-details {
+  margin: 0;
+}
+.dajb-advanced-summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: #888;
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.dajb-advanced-summary::before {
+  content: '▶';
+  font-size: 9px;
+  transition: transform 0.15s;
+}
+.dajb-advanced-details[open] .dajb-advanced-summary::before {
+  transform: rotate(90deg);
+}
+.dajb-advanced-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+}
+
 .dajb-fieldset legend {
   color: #888;
   font-size: 11px;
@@ -834,4 +863,38 @@ mark.dajb-match {
   font-weight: bold;
   font-style: normal;
   margin-right: 4px;
+}
+
+/* ── Table preview ──────────────────────────────────────────────────────── */
+
+.dajb-preview-table-wrapper {
+  overflow-x: auto;
+  margin: 4px 0;
+}
+
+.dajb-preview-table-wrapper table {
+  border-collapse: collapse;
+  font-size: 11px;
+  min-width: 100%;
+}
+
+.dajb-preview-table-wrapper th,
+.dajb-preview-table-wrapper td {
+  border: 1px solid #444;
+  padding: 2px 6px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.dajb-preview-table-wrapper th {
+  background: #2a2a2a;
+  font-weight: bold;
+  color: #d0c0ff;
+}
+
+.dajb-preview-table-badge {
+  font-size: 10px;
+  color: #a78bfa;
+  margin-top: 2px;
+  font-style: italic;
 }

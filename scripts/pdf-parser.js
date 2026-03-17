@@ -167,6 +167,7 @@ export class PDFParser {
           fontName, color,
           x: rawX,
           y: item.transform?.[5] ?? 0,
+          width: item.width ?? 0,
           xNorm: viewport.width > 0 ? rawX / viewport.width : 0,
           isBold:   /bold|heavy|black|demi|semibold|extrabold|ultrabold/.test(fn),
           isItalic: /italic|oblique|slanted|inclined/.test(fn),
@@ -413,6 +414,131 @@ export class PDFParser {
    */
   static itemsToText(items) {
     return items.map((i) => i.text).join(" ");
+  }
+
+  /**
+   * Geometrically parse a flat items array into an HTML table.
+   *
+   * Algorithm:
+   *  1. Sort items by descending Y, then ascending X (PDF Y=0 is bottom of page).
+   *  2. Group into visual rows: items within `fontSize/2` pt of the current row Y.
+   *  3. Detect column boundaries: collect all item X values, find gaps wider than
+   *     `columnGapMinPt`, use gap midpoints as column dividers.
+   *  4. Assign each item to a column by its X position.
+   *  5. Merge continuation rows: a visual row whose leftmost item X is greater than
+   *     the right edge of column 0 is treated as a wrapped continuation of the
+   *     previous logical row rather than a new row.
+   *  6. Emit <table> HTML with optional <thead> for the first row.
+   *
+   * @param {Array}  items
+   * @param {object} [options]
+   * @param {boolean} [options.firstRowHeader=true]
+   * @param {number}  [options.columnGapMinPt=4]
+   * @param {boolean} [options.preserveFormatting=false]
+   * @returns {{ html: string, rowCount: number, colCount: number }}
+   */
+  static parseTableRegion(items, {
+    firstRowHeader  = true,
+    columnGapMinPt  = 4,
+    preserveFormatting = false,
+  } = {}) {
+    if (!items?.length) return { html: '', rowCount: 0, colCount: 0 };
+
+    const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    // 1. Sort descending Y (top of page first), then ascending X
+    const sorted = [...items].sort((a, b) => b.y - a.y || a.x - b.x);
+
+    // Median font size → row-grouping tolerance
+    const sizes = sorted.map(i => i.fontSize).filter(Boolean).sort((a, b) => a - b);
+    const medianSize = sizes[Math.floor(sizes.length / 2)] ?? 10;
+    const rowTol = medianSize / 2;
+
+    // 2. Group into visual rows
+    const visualRows = [];
+    let curRow = [], curY = null;
+    for (const item of sorted) {
+      if (curY === null || Math.abs(item.y - curY) <= rowTol) {
+        if (curY === null) curY = item.y;
+        curRow.push(item);
+      } else {
+        visualRows.push(curRow);
+        curRow = [item];
+        curY = item.y;
+      }
+    }
+    if (curRow.length) visualRows.push(curRow);
+
+    if (!visualRows.length) return { html: '', rowCount: 0, colCount: 1 };
+
+    // 3. Detect column boundaries via X-gap analysis
+    const allX = sorted.map(i => i.x).sort((a, b) => a - b);
+    const colBoundaries = []; // x values that divide columns
+    for (let i = 1; i < allX.length; i++) {
+      if (allX[i] - allX[i - 1] > columnGapMinPt) {
+        colBoundaries.push((allX[i] + allX[i - 1]) / 2);
+      }
+    }
+    const colCount = colBoundaries.length + 1;
+
+    const colOf = (x) => {
+      for (let c = 0; c < colBoundaries.length; c++) {
+        if (x < colBoundaries[c]) return c;
+      }
+      return colBoundaries.length;
+    };
+
+    // Right edge of column 0 (used for continuation detection)
+    const col0RightEdge = colBoundaries[0] ?? Infinity;
+
+    // 4 & 5. Assign items to columns and merge continuation rows
+    const logicalRows = []; // each entry: Array(colCount) of item[]
+    for (const vrow of visualRows) {
+      const colItems = Array.from({ length: colCount }, () => []);
+      for (const item of vrow) colItems[colOf(item.x)].push(item);
+
+      // Continuation: no items in col 0 and leftmost item is right of col0's boundary
+      const isContinuation =
+        logicalRows.length > 0 &&
+        colItems[0].length === 0 &&
+        vrow.length > 0 &&
+        vrow[0].x > col0RightEdge;
+
+      if (isContinuation) {
+        const prev = logicalRows[logicalRows.length - 1];
+        for (let c = 1; c < colCount; c++) {
+          prev[c].push(...colItems[c]);
+        }
+      } else {
+        logicalRows.push(colItems);
+      }
+    }
+
+    // 6. Render to HTML
+    const renderCell = (cellItems) => {
+      if (!cellItems.length) return '';
+      return preserveFormatting
+        ? PDFParser.itemsToHTML(cellItems)
+        : esc(cellItems.map(i => i.text).join(' '));
+    };
+
+    let html = '<table>\n';
+    for (let r = 0; r < logicalRows.length; r++) {
+      const isHeader = firstRowHeader && r === 0;
+      const tag = isHeader ? 'th' : 'td';
+      if (isHeader) html += '  <thead>\n';
+      else if (r === 1 && firstRowHeader) html += '  <tbody>\n';
+      html += '    <tr>';
+      for (let c = 0; c < colCount; c++) {
+        html += `<${tag}>${renderCell(logicalRows[r][c])}</${tag}>`;
+      }
+      html += '</tr>\n';
+      if (isHeader) html += '  </thead>\n';
+    }
+    if (logicalRows.length > (firstRowHeader ? 1 : 0)) html += '  </tbody>\n';
+    html += '</table>';
+
+    return { html, rowCount: logicalRows.length, colCount };
   }
 
   /**

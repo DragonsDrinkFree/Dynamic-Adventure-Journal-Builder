@@ -13,7 +13,7 @@ export class RuleManager {
     return {
       id: foundry.utils.randomID(),
       name: "New Rule",
-      // "create-category" | "create-page" | "create-section" | "create-collated-section" | "remove-section" | "strip"
+      // "create-category" | "create-page" | "create-section" | "create-collated-section" | "remove-section" | "strip" | "create-table"
       ruleType: "create-section",
       disabled: false,
       // top-level only
@@ -26,6 +26,8 @@ export class RuleManager {
       flags: "gi",
       captureGroup: 0,
       fontSize: null,
+      minFontSize: null,
+      maxFontSize: null,
       fontNameContains: "",
       fontColor: "",
       // output
@@ -33,6 +35,9 @@ export class RuleManager {
       preserveFormatting: false,
       breakOnSentence: false, // only split at sentence boundaries (.!?)
       groupName: "",          // if non-empty: all matches are collated under this single heading
+      // Table options (used when ruleType === 'create-table')
+      firstRowHeader: true,
+      columnGapMinPt: 4,
       outputFormat: {
         headingLevel: 2,
         additionalFormatting: "", // "" | "ul" | "ol" | "blockquote" | "pre" | "secret"
@@ -183,12 +188,10 @@ export class RuleManager {
       throw new Error('JSON must have a top-level "rules" array');
     this.rules = data.rules;
     this._walk(this.rules, (rule) => {
-      // Migrate old minFontSize/maxFontSize schema to exact fontSize
-      if (rule.fontSize === undefined && (rule.minFontSize != null || rule.maxFontSize != null)) {
-        rule.fontSize = rule.minFontSize ?? rule.maxFontSize;
-      }
-      delete rule.minFontSize;
-      delete rule.maxFontSize;
+      // Ensure font size fields exist (min/max are now intentional advanced fields)
+      if (rule.fontSize    === undefined) rule.fontSize    = null;
+      if (rule.minFontSize === undefined) rule.minFontSize = null;
+      if (rule.maxFontSize === undefined) rule.maxFontSize = null;
       // Migrate asList/listType → additionalFormatting
       if (rule.outputFormat && rule.outputFormat.additionalFormatting === undefined) {
         rule.outputFormat.additionalFormatting = rule.outputFormat.asList
@@ -196,6 +199,11 @@ export class RuleManager {
           : '';
         delete rule.outputFormat.asList;
         delete rule.outputFormat.listType;
+      }
+      // Ensure table-specific fields exist on loaded rules
+      if (rule.ruleType === 'create-table') {
+        if (rule.firstRowHeader === undefined) rule.firstRowHeader = true;
+        if (rule.columnGapMinPt === undefined) rule.columnGapMinPt = 4;
       }
     });
   }
@@ -363,7 +371,7 @@ export class RuleManager {
   static splitOnCombinedTargeting(items, rule) {
     if (!items?.length) return [];
 
-    const hasFontCriteria = rule.fontSize != null || !!rule.fontNameContains || !!rule.fontColor;
+    const hasFontCriteria = rule.fontSize != null || rule.minFontSize != null || rule.maxFontSize != null || !!rule.fontNameContains || !!rule.fontColor;
     const hasPattern = !!rule.pattern;
 
     // No targeting at all: everything is body
@@ -523,8 +531,8 @@ export class RuleManager {
   static splitOnMultipleRules(items, childRules) {
     if (!items?.length || !childRules?.length) return [];
 
-    // Skip disabled rules entirely
-    childRules = childRules.filter(r => !r.disabled);
+    // Skip disabled rules and table rules (tables are terminal renderers, not boundary producers)
+    childRules = childRules.filter(r => !r.disabled && r.ruleType !== 'create-table');
     if (!childRules.length) {
       const body = items.map(i => i.text).join(' ').trim();
       return body ? [{ match: null, title: null, body, bodyItems: items, rule: null }] : [];
@@ -647,7 +655,7 @@ export class RuleManager {
   }
 
   static _applyStrip(items, rule) {
-    const hasFontCriteria = rule.fontSize != null || !!rule.fontNameContains || !!rule.fontColor;
+    const hasFontCriteria = rule.fontSize != null || rule.minFontSize != null || rule.maxFontSize != null || !!rule.fontNameContains || !!rule.fontColor;
     const hasPattern = !!rule.pattern;
     if (!hasFontCriteria && !hasPattern) return items;
 
