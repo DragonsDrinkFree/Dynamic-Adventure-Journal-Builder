@@ -21,9 +21,9 @@
   "styles": ["styles/builder.css"],
   "packs": [
     {
-      "name": "dynamic-journal-builder-guide",
+      "name": "dynamic-journal-builder",
       "label": "Dynamic Journal Builder Guide",
-      "path": "packs/dynamic-journal-builder-guide.db",
+      "path": "packs/dynamic-journal-builder.db",
       "type": "JournalEntry",
       "ownership": {
         "PLAYER": "OBSERVER",

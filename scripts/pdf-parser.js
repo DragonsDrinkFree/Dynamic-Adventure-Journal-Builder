@@ -494,8 +494,7 @@ export class PDFParser {
       if (rule.maxFontSize != null && item.fontSize > rule.maxFontSize) return false;
       if (rule.fontNameContains &&
           !item.fontName?.toLowerCase().includes(rule.fontNameContains.toLowerCase())) return false;
-      if (rule.fontColor && item.color !== rule.fontColor.toLowerCase()) return false;
-      if (rule.xMin != null && (item.xNorm ?? 0) * 100 < rule.xMin) return false;
+if (rule.xMin != null && (item.xNorm ?? 0) * 100 < rule.xMin) return false;
       if (rule.xMax != null && (item.xNorm ?? 0) * 100 > rule.xMax) return false;
       return true;
     });

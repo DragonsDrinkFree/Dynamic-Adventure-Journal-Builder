@@ -239,14 +239,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           <span>Font Name Contains</span>
           <input type="text" data-field="fontNameContains" value="${this._esc(rule.fontNameContains ?? '')}" placeholder="e.g. Bold, Garamond" />
         </label>
-        <label class="dajb-field">
-          <span>Font Color</span>
-          <div class="dajb-color-field">
-            ${rule.fontColor ? `<span class="dajb-color-swatch" style="background:${this._esc(rule.fontColor)}"></span>` : ''}
-            <input type="text" data-field="fontColor" value="${this._esc(rule.fontColor ?? '')}" placeholder="#rrggbb (from Inspector)" class="dajb-monospace" style="width:140px" />
-          </div>
-        </label>
-        <em class="dajb-hint">Font + regex = AND (both must match). Use the Fonts inspector to discover values.</em>
+        <em class="dajb-hint">Font + regex = AND (both must match). Use the Scan Fonts inspector to discover values.</em>
       </fieldset>`;
 
     const regexFields = `
@@ -464,10 +457,10 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     // Refresh preview on targeting-related changes — debounced for text fields
     // so typing doesn't steal focus by re-rendering on every character.
     if (["pattern", "flags", "pageRanges", "captureGroup", "fontSize", "minFontSize", "maxFontSize",
-         "fontNameContains", "fontColor", "groupName", "breakOnSentence",
+         "fontNameContains", "groupName", "breakOnSentence",
          "outputFormat.headingLevel", "outputFormat.additionalFormatting", "outputFormat.paragraphDetection",
          "firstRowHeader", "columnGapMinPt"].includes(field)) {
-      const isTextInput = ["pattern", "flags", "pageRanges", "fontNameContains", "fontColor", "groupName"].includes(field);
+      const isTextInput = ["pattern", "flags", "pageRanges", "fontNameContains", "groupName"].includes(field);
       this._schedulePreviewRefresh(!isTextInput);
     }
   }
@@ -656,7 +649,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       const sectionChildRules = rule.children?.filter(c =>
         (c.ruleType === 'create-section' || c.ruleType === 'create-collated-section' || c.ruleType === 'remove-section') &&
         !c.disabled &&
-        (c.pattern || c.fontSize != null || c.fontNameContains || c.fontColor)
+        (c.pattern || c.fontSize != null || c.fontNameContains)
       ) ?? [];
       const childRule = sectionChildRules[0] ?? null;
 
@@ -834,7 +827,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           preserveFormatting: tableChild.preserveFormatting ?? false,
         };
         const hasCriteria = !!(tableChild.pattern || tableChild.fontSize != null ||
-                               tableChild.fontNameContains || tableChild.fontColor);
+                               tableChild.fontNameContains);
         let tableItems = strippedItems;
         if (hasCriteria && strippedItems.length) {
           const sections = RuleManager.splitOnCombinedTargeting(strippedItems, tableChild);
@@ -1107,7 +1100,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       const table = document.createElement('table');
       table.className = 'dajb-font-table';
       table.innerHTML = `<thead><tr>
-        <th></th><th>Font Name</th><th>Size (pt)</th><th>B/I</th><th>Color</th><th>Count</th><th>Sample Text</th>
+        <th></th><th>Font Name</th><th>Size (pt)</th><th>B/I</th><th>Count</th><th>Sample Text</th>
       </tr></thead>`;
 
       const canApply = !!this.selectedRuleId;
@@ -1121,10 +1114,6 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           <td class="dajb-monospace dajb-font-name">${this._esc(row.fontName || '(unknown)')}</td>
           <td class="dajb-font-size">${row.fontSize}</td>
           <td class="dajb-font-bi">${row.isBold ? '<strong>B</strong>' : ''}${row.isItalic ? '<em>I</em>' : ''}</td>
-          <td class="dajb-font-color">
-            <span class="dajb-color-swatch" style="background:${this._esc(row.color)}"></span>
-            <span class="dajb-monospace">${this._esc(row.color)}</span>
-          </td>
           <td class="dajb-font-count">${row.count}</td>
           <td class="dajb-font-sample">${this._esc(row.sample)}</td>
         `;
@@ -1132,7 +1121,6 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           tr.querySelector('.dajb-font-apply-btn').addEventListener('click', () => {
             this.ruleManager.updateRule(this.selectedRuleId, {
               fontNameContains: row.fontName,
-              fontColor: row.color !== '#000000' ? row.color : '',
               fontSize: row.fontSize,
             });
             this._renderEditor();
@@ -1158,10 +1146,46 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     if (this._selectionChangeBound) document.removeEventListener("selectionchange", this._selectionChangeBound);
     this._selectionChangeBound = () => this._onSelectionChange();
     document.addEventListener("selectionchange", this._selectionChangeBound);
+
+    // Single-click on a preview item: auto-select it and show toolbar immediately.
+    if (this._previewClickBound && this._previewClickTarget) {
+      this._previewClickTarget.removeEventListener("click", this._previewClickBound);
+    }
+    this._previewClickBound  = (e) => this._onPreviewItemClick(e);
+    this._previewClickTarget = this.element;
+    this.element?.addEventListener("click", this._previewClickBound);
+  }
+
+  _onPreviewItemClick(e) {
+    const span = e.target.closest(".dajb-preview-item");
+    if (!span) return;
+
+    // Programmatically select the span text.
+    const range = document.createRange();
+    range.selectNodeContents(span);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+
+    // Show toolbar immediately — skip the selectionchange debounce that will
+    // fire as a side-effect of setting the selection above.
+    clearTimeout(this._selectionDebounce);
+    this._skipNextSelectionChange = true;
+
+    const rect = span.getBoundingClientRect();
+    this._showSelectionToolbar([span], rect.right, rect.bottom + 6);
   }
 
   _onSelectionChange() {
     clearTimeout(this._selectionDebounce);
+
+    // Ignore the selectionchange that fires from our own programmatic selection
+    // inside _onPreviewItemClick — the toolbar is already shown.
+    if (this._skipNextSelectionChange) {
+      this._skipNextSelectionChange = false;
+      return;
+    }
+
     const sel = window.getSelection();
 
     // Collapsed or empty — hide toolbar
@@ -1206,7 +1230,6 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     };
     const fontName  = freq(spans.map(s => s.dataset.fontName));
     const fontSize  = parseFloat(freq(spans.map(s => s.dataset.fontSize))) || null;
-    const color     = freq(spans.map(s => s.dataset.color));
     const sampleText = spans.map(s => s.textContent).join(" ").slice(0, 60);
 
     const bar = document.createElement("div");
@@ -1214,31 +1237,28 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     bar.style.left = `${clientX}px`;
     bar.style.top  = `${clientY + 12}px`;
 
-    const colorDot = color && color !== "#000000"
-      ? `<span class="dajb-color-swatch" style="background:${color};flex-shrink:0"></span>` : "";
     const canAddToCurrent = !!this.selectedRuleId &&
       this.ruleManager.getRuleById(this.selectedRuleId)?.ruleType !== 'create-category';
 
     bar.innerHTML = `
       <div class="dajb-sel-info">
-        ${colorDot}
         <span class="dajb-sel-sample">"${this._esc(sampleText)}"</span>
-        <span class="dajb-sel-attrs">${fontSize ? fontSize + "pt" : ""}${fontName ? " · " + fontName : ""}${color !== "#000000" ? " · " + color : ""}</span>
+        <span class="dajb-sel-attrs">${fontSize ? fontSize + "pt" : ""}${fontName ? " · " + fontName : ""}</span>
       </div>
       ${canAddToCurrent ? `<button type="button" class="dajb-btn dajb-sel-add-btn" title="Apply these font properties to the currently selected rule's targeting">+ Add to Rule</button>` : ""}
-      <button type="button" class="dajb-btn dajb-sel-create-btn" title="Create a new rule targeting this text's font/size/color">+ Create Rule</button>
+      <button type="button" class="dajb-btn dajb-sel-create-btn" title="Create a new rule targeting this text's font/size">+ Create Rule</button>
       <button type="button" class="dajb-icon-btn dajb-sel-dismiss-btn" title="Dismiss">×</button>
     `;
 
     if (canAddToCurrent) {
       bar.querySelector(".dajb-sel-add-btn").addEventListener("click", () => {
-        this._addToCurrentRule({ fontName, fontSize, color });
+        this._addToCurrentRule({ fontName, fontSize });
         this._dismissSelectionToolbar();
         window.getSelection()?.removeAllRanges();
       });
     }
     bar.querySelector(".dajb-sel-create-btn").addEventListener("click", () => {
-      this._createRuleFromSelection({ fontName, fontSize, color });
+      this._createRuleFromSelection({ fontName, fontSize });
       this._dismissSelectionToolbar();
       window.getSelection()?.removeAllRanges();
     });
@@ -1263,12 +1283,11 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     }
   }
 
-  _addToCurrentRule({ fontName, fontSize, color }) {
+  _addToCurrentRule({ fontName, fontSize }) {
     if (!this.selectedRuleId) return;
     const updates = {};
-    if (fontName)                                        updates.fontNameContains = fontName;
-    if (fontSize != null)                                updates.fontSize = fontSize;
-    if (color && color !== "#000000" && color !== "#ffffff") updates.fontColor = color;
+    if (fontName)       updates.fontNameContains = fontName;
+    if (fontSize != null) updates.fontSize = fontSize;
     if (!Object.keys(updates).length) return;
     this.ruleManager.updateRule(this.selectedRuleId, updates);
     this._renderEditor();
@@ -1276,11 +1295,10 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     ui.notifications?.info("DAJB | Font properties applied to current rule.");
   }
 
-  _createRuleFromSelection({ fontName, fontSize, color }) {
+  _createRuleFromSelection({ fontName, fontSize }) {
     const overrides = {};
-    if (fontName)              overrides.fontNameContains = fontName;
-    if (fontSize != null)      overrides.fontSize = fontSize;
-    if (color && color !== "#000000" && color !== "#ffffff") overrides.fontColor = color;
+    if (fontName)         overrides.fontNameContains = fontName;
+    if (fontSize != null) overrides.fontSize = fontSize;
 
     let rule;
     if (this.selectedRuleId) {

@@ -595,6 +595,20 @@ mark.dajb-match {
   background: #1a3a5a;
 }
 
+.dajb-scan-fonts-btn {
+  background: #1a5c2a;
+  border: 1px solid #2d8a42;
+  color: #7dda8e;
+  cursor: pointer;
+  padding: 2px 8px;
+  font-size: 12px;
+  border-radius: 3px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.dajb-scan-fonts-btn:hover { background: #1f7a35; color: #a8f0b4; }
+.dajb-scan-fonts-btn.active { background: #145220; color: #4ec966; border-color: #2d8a42; }
+
 .dajb-font-inspector {
   padding: 8px;
 }

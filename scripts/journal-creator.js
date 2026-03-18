@@ -117,12 +117,12 @@ export class JournalCreator {
 
     const pageChild = children?.find(c =>
       c.ruleType === 'create-page' && !c.disabled &&
-      (c.pattern || c.fontSize != null || c.fontNameContains || c.fontColor)
+      (c.pattern || c.fontSize != null || c.fontNameContains)
     );
     const sectionChildren = children?.filter(c =>
       (c.ruleType === 'create-section' || c.ruleType === 'create-collated-section' || c.ruleType === 'remove-section') &&
       !c.disabled &&
-      (c.pattern || c.fontSize != null || c.fontNameContains || c.fontColor)
+      (c.pattern || c.fontSize != null || c.fontNameContains)
     ) ?? [];
 
     const primaryChild = pageChild ?? sectionChildren[0] ?? null;
@@ -138,7 +138,7 @@ export class JournalCreator {
         preserveFormatting: tableChild.preserveFormatting ?? preserveFormatting,
       };
       const hasCriteria = !!(tableChild.pattern || tableChild.fontSize != null ||
-                             tableChild.fontNameContains || tableChild.fontColor);
+                             tableChild.fontNameContains);
       if (hasCriteria) {
         const sections = RuleManager.splitOnCombinedTargeting(cleanedItems, tableChild);
         let preambleHTML = '';
