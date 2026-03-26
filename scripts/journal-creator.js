@@ -35,6 +35,8 @@ export class JournalCreator {
   // ── Top-level rule ────────────────────────────────────────────────────────
 
   static async _processTopRule(rule, ruleManager, pdfParser) {
+    if (rule.disabled) return;
+
     // ── create-category: meta rule — just ensure the category exists ──────────
     if (rule.ruleType === 'create-category') {
       if (!rule.targetJournal && !rule.name) return;
@@ -113,7 +115,8 @@ export class JournalCreator {
     // Helper: strip a single wrapping <p>…</p> so content can flow inline
     const stripP = s => s ? s.replace(/^<p>([\s\S]*)<\/p>$/i, '$1').trim() : '';
 
-    const tableChild = children?.find(c => c.ruleType === 'create-table' && !c.disabled) ?? null;
+    const tableChild      = children?.find(c => c.ruleType === 'create-table'       && !c.disabled) ?? null;
+    const formatTextRules = children?.filter(c => c.ruleType === 'create-format-text' && !c.disabled && c.pattern) ?? [];
 
     const pageChild = children?.find(c =>
       c.ruleType === 'create-page' && !c.disabled &&
@@ -133,10 +136,70 @@ export class JournalCreator {
     if (tableChild && !primaryChild) {
       if (!cleanedItems.length) return '';
       const tableOpts = {
-        firstRowHeader:     tableChild.firstRowHeader ?? true,
-        columnGapMinPt:     tableChild.columnGapMinPt ?? 4,
-        preserveFormatting: tableChild.preserveFormatting ?? preserveFormatting,
+        firstRowHeader:      tableChild.firstRowHeader      ?? true,
+        columnGapMinPt:      tableChild.columnGapMinPt      ?? 4,
+        columnGapMultiplier: tableChild.columnGapMultiplier ?? 0,
+        maxColumns:          tableChild.maxColumns          ?? 0,
+        preserveFormatting:  tableChild.preserveFormatting  ?? preserveFormatting,
       };
+
+      // ── Auto-detect mode ──────────────────────────────────────────────────────
+      if (tableChild.autoDetect) {
+        const detected = PDFParser.detectTableBoundaries(cleanedItems);
+        if (!detected.length) {
+          const rawText = cleanedItems.length ? cleanedItems.map(i => i.text).join(' ').trim() : text;
+          if (!rawText) return '';
+          const formatted = formatTextRules.length
+            ? JournalCreator._applyFormatTextRules(rawText, formatTextRules)
+            : rawText;
+          return `<p>${formatted}</p>`;
+        }
+
+        // Build a Set for fast membership test and compute each table's Y-top
+        const inTable = new Set(detected.flat());
+        const tableRanges = detected.map(tItems => ({
+          yMax:  Math.max(...tItems.map(i => i.y)),
+          items: tItems,
+        })).sort((a, b) => b.yMax - a.yMax);   // top-to-bottom
+
+        // Walk non-table items top-to-bottom, interleaving table HTML
+        const allSorted  = [...cleanedItems].sort((a, b) => b.y - a.y);
+        let html         = '';
+        let proseItems   = [];
+        let ti           = 0;
+
+        const flushProse = () => {
+          if (!proseItems.length) return;
+          const rawText = proseItems.map(i => i.text).join(' ');
+          const formatted = formatTextRules.length
+            ? JournalCreator._applyFormatTextRules(rawText, formatTextRules)
+            : rawText;
+          html += `<p>${formatted}</p>`;
+          proseItems = [];
+        };
+
+        for (const item of allSorted) {
+          // Emit any tables whose top (yMax) is above the current item's Y
+          while (ti < tableRanges.length && tableRanges[ti].yMax >= item.y) {
+            flushProse();
+            const { html: tHtml } = PDFParser.parseTableRegion(tableRanges[ti].items, tableOpts);
+            if (tHtml) html += tHtml;
+            ti++;
+          }
+          if (!inTable.has(item)) proseItems.push(item);
+        }
+        // Flush any remaining tables (at or below the last prose item)
+        while (ti < tableRanges.length) {
+          flushProse();
+          const { html: tHtml } = PDFParser.parseTableRegion(tableRanges[ti].items, tableOpts);
+          if (tHtml) html += tHtml;
+          ti++;
+        }
+        flushProse();
+        return html;
+      }
+
+      // ── Targeted mode (existing logic) ───────────────────────────────────────
       const hasCriteria = !!(tableChild.pattern || tableChild.fontSize != null ||
                              tableChild.fontNameContains);
       if (hasCriteria) {
@@ -144,11 +207,8 @@ export class JournalCreator {
         let preambleHTML = '';
         const tableItems = [];
         for (const sec of sections) {
-          if (sec.match === null) {
-            if (sec.body) preambleHTML += `<p>${sec.body}</p>`;
-          } else {
-            tableItems.push(...(sec.titleItems ?? []), ...(sec.bodyItems ?? []));
-          }
+          if (sec.match === null) { if (sec.body) preambleHTML += `<p>${sec.body}</p>`; }
+          else { tableItems.push(...(sec.titleItems ?? []), ...(sec.bodyItems ?? [])); }
         }
         if (!tableItems.length) return preambleHTML || (text ? `<p>${text}</p>` : '');
         const { html } = PDFParser.parseTableRegion(tableItems, tableOpts);
@@ -160,17 +220,21 @@ export class JournalCreator {
 
     if (!primaryChild) {
       // No child rule — render body as final content
-      if (cleanedItems.length && paragraphDetection) {
+      if (cleanedItems.length && paragraphDetection && !formatTextRules.length) {
         return PDFParser.itemsToParagraphedHTML(cleanedItems, {
           mode: paragraphDetection,
           preserveFormatting,
         });
       }
-      if (preserveFormatting && cleanedItems.length) {
+      if (preserveFormatting && cleanedItems.length && !formatTextRules.length) {
         return `<p>${PDFParser.itemsToHTML(cleanedItems)}</p>`;
       }
       const cleanedText = cleanedItems.length ? cleanedItems.map(i => i.text).join(' ').trim() : text;
-      return cleanedText ? `<p>${cleanedText}</p>` : "";
+      if (!cleanedText) return "";
+      const formatted = formatTextRules.length
+        ? JournalCreator._applyFormatTextRules(cleanedText, formatTextRules)
+        : cleanedText;
+      return `<p>${formatted}</p>`;
     }
 
     // Child rule's own preserveFormatting / paragraphDetection settings
@@ -396,6 +460,40 @@ export class JournalCreator {
       html += level === 0 ? body : `<h${level}>${sec.title}</h${level}>` + body;
     }
     return html || (preserveFormatting && cleanedItems.length ? `<p>${PDFParser.itemsToHTML(cleanedItems)}</p>` : (text ? `<p>${text}</p>` : ""));
+  }
+
+  // ── Format Text ───────────────────────────────────────────────────────────
+
+  /**
+   * Apply one or more create-format-text child rules to a plain-text body string.
+   * Each rule's regex pattern is matched globally; every match is wrapped in the
+   * configured HTML formatting (bold, underline, indent) and/or surrounded by
+   * <br> line-return markers.
+   */
+  static _applyFormatTextRules(text, rules) {
+    if (!rules?.length || !text) return text;
+    let result = text;
+    for (const rule of rules) {
+      if (!rule.pattern) continue;
+      const fo = rule.formatOptions ?? {};
+      try {
+        // Ensure global flag so all occurrences are replaced
+        const flagStr = (rule.flags || 'g').includes('g') ? (rule.flags || 'g') : (rule.flags || '') + 'g';
+        const regex = new RegExp(rule.pattern, flagStr);
+        result = result.replace(regex, (match) => {
+          let inner = match;
+          if (fo.bold)      inner = `<strong>${inner}</strong>`;
+          if (fo.underline) inner = `<u>${inner}</u>`;
+          if (fo.indent)    inner = `<span style="padding-left:1.5em;">${inner}</span>`;
+          const before = fo.lineReturnBefore ? '<br>' : '';
+          const after  = fo.lineReturnAfter  ? '<br>'  : '';
+          return `${before}${inner}${after}`;
+        });
+      } catch (e) {
+        console.warn('DAJB | Format Text invalid regex:', rule.pattern, e);
+      }
+    }
+    return result;
   }
 
   // ── Text helpers ──────────────────────────────────────────────────────────

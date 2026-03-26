@@ -58,6 +58,8 @@ export class PDFParser {
    * final split result.
    */
   static debugColumns = false;
+  /** Set PDFParser.debugDetect = true in the console to log detectTableBoundaries internals. */
+  static debugDetect  = false;
 
   constructor() {
     /** @type {Object|null} PDF.js document proxy */
@@ -87,7 +89,7 @@ export class PDFParser {
    */
   async loadPDF(file) {
     const pdfjsLib = await getPdfjsLib();
-    this._pdfjsLib = pdfjsLib; // retain for OPS constant access in _extractColorSequence
+    this._pdfjsLib = pdfjsLib;
 
     const arrayBuffer = await file.arrayBuffer();
     const typedArray = new Uint8Array(arrayBuffer);
@@ -151,42 +153,41 @@ export class PDFParser {
     const viewport = page.getViewport({ scale: 1 });
     this._pageWidths.set(pageNum, viewport.width);
 
-    const [content, opList] = await Promise.all([
-      page.getTextContent(),
-      page.getOperatorList().catch(() => null),
-    ]);
+    const content = await page.getTextContent();
 
-    // Extract per-show-text fill color from the operator list.
-    // Each entry in colorSeq corresponds to one showText-type op (in order).
-    const colorSeq = opList ? PDFParser._extractColorSequence(opList, this._pdfjsLib) : [];
-
-    // content.items may include whitespace-only entries that have no matching
-    // showText op (PDF.js can synthesise them).  Assign colors by walking both
-    // arrays in tandem: only advance the color index for items that actually
-    // map to a showText op (i.e. non-empty strings).
-    let colorIdx = 0;
     const items = content.items
       .map((item) => {
         const fontName = item.fontName ?? "";
         const fn = fontName.toLowerCase();
         const hasText = typeof item.str === 'string' && item.str.trim();
-        const color = hasText ? (colorSeq[colorIdx++] ?? '#000000') : '#000000';
         const rawX = item.transform?.[4] ?? 0;
         return { _keep: !!hasText, text: item.str, fontSize: Math.round(Math.abs(item.transform?.[3] ?? 0) * 100) / 100,
-          fontName, color,
+          fontName,
           x: rawX,
           y: item.transform?.[5] ?? 0,
           width: item.width ?? 0,
           xNorm: viewport.width > 0 ? rawX / viewport.width : 0,
           isBold:   /bold|heavy|black|demi|semibold|extrabold|ultrabold/.test(fn),
           isItalic: /italic|oblique|slanted|inclined/.test(fn),
+          pageNum,
         };
       })
       .filter(item => item._keep)
       .map(({ _keep, ...rest }) => rest);
 
-    this._itemCache.set(pageNum, items);
-    return items;
+    // Deduplicate items with identical position and text — some PDFs render
+    // the same text twice (e.g. for a shadow/stroke effect) producing doubled
+    // output.  We keep only the first occurrence of each (x,y,text) triple.
+    const seen = new Set();
+    const deduped = items.filter(item => {
+      const key = `${Math.round(item.x)},${Math.round(item.y)},${item.text}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    this._itemCache.set(pageNum, deduped);
+    return deduped;
   }
 
   /**
@@ -338,33 +339,100 @@ export class PDFParser {
       hist[b]++;
     }
 
-    // Find the bucket with the minimum item count in the central 25–75 % of page
-    // width — that is the most likely column gap.  Accept it as a real gap only
-    // when it is markedly emptier than the densest bucket on each flank
-    // (< 30 % of the smaller flank's max).  This avoids both false positives
-    // (margin dips inside a single column) and missed gaps (one sparse item
-    // crossing the gutter).
-    const midLo = pageWidth * 0.25;
-    const midHi = pageWidth * 0.75;
+    // Select the best column-gap candidate using a bimodality score:
+    //   score = leftMax × rightMax
+    // where leftMax / rightMax are the densest buckets on each flank.
+    // A true two-column gap sits between two dense content clusters so its
+    // score is high.  A false gap that lives *inside* one column (e.g. a
+    // sparse area inside a table) has a small rightMax and scores low.
+    // Among equal-score candidates the emptier bucket wins.
+    //
+    // Search window: 30–70 % of the item x-range (not page width).
+    // Using the content range instead of the page avoids selecting margin/indent
+    // boundaries as column gaps — especially on right-hand (odd) pages where the
+    // binding margin shifts the content rightward.
+    const xSpan = xMax - xMin;
+    const midLo = xMin + xSpan * 0.30;
+    const midHi = xMin + xSpan * 0.70;
     let bestBucket = -1;
-    let bestCount  = Infinity;
-    for (let b = 0; b < BUCKETS; b++) {
+    let bestScore  = -1;
+    let bestLeft   = 0;
+    let bestRight  = 0;
+    for (let b = 1; b < BUCKETS - 1; b++) {
       const centre = xMin + (b + 0.5) * bucketWidth;
       if (centre < midLo || centre > midHi) continue;
-      if (hist[b] < bestCount) { bestCount = hist[b]; bestBucket = b; }
+      const lm = Math.max(...hist.slice(0, b));
+      const rm = Math.max(...hist.slice(b + 1));
+      // Balance factor: penalise lopsided splits so that margin/indent
+      // boundaries (which put most content on one side) lose to the true
+      // column gap (which splits content roughly evenly).
+      const leftSum  = hist.slice(0, b).reduce((a, c) => a + c, 0);
+      const rightSum = hist.slice(b + 1).reduce((a, c) => a + c, 0);
+      const balance  = Math.min(leftSum, rightSum) / (Math.max(leftSum, rightSum) || 1);
+      const score = lm * rm * balance;
+      if (score > bestScore ||
+          (score === bestScore && hist[b] < hist[bestBucket])) {
+        bestScore  = score;
+        bestBucket = b;
+        bestLeft   = lm;
+        bestRight  = rm;
+      }
     }
+    const bestCount = bestBucket >= 0 ? hist[bestBucket] : Infinity;
 
     let splitX = null;
+    let splitReason = '';
     if (bestBucket >= 0) {
-      const leftMax  = bestBucket > 0              ? Math.max(...hist.slice(0, bestBucket))           : 0;
-      const rightMax = bestBucket < BUCKETS - 1    ? Math.max(...hist.slice(bestBucket + 1))          : 0;
-      // Both flanks must be dense enough to represent a real column.
-      // Stray running headers, page numbers, or end-of-line words on a single-
-      // column page produce rightMax of 1–2; genuine columns produce 5+.
-      const minFlankDensity = Math.max(4, items.length / BUCKETS * 0.5);
-      if (leftMax >= minFlankDensity && rightMax >= minFlankDensity &&
-          bestCount < Math.min(leftMax, rightMax) * 0.30) {
-        splitX = xMin + (bestBucket + 0.5) * bucketWidth;
+      const gapX = xMin + (bestBucket + 0.5) * bucketWidth;
+      const leftCount  = items.filter(i => i.x <  gapX).length;
+      const rightCount = items.filter(i => i.x >= gapX).length;
+      const minFlankDensity = Math.max(2, items.length / BUCKETS * 0.2);
+      if (bestLeft  >= minFlankDensity &&
+          bestRight >= minFlankDensity &&
+          bestCount < Math.min(bestLeft, bestRight) * 0.30 &&
+          Math.min(leftCount, rightCount) >= 10) {
+        splitX = gapX;
+        splitReason = 'primary';
+      }
+    }
+
+    // ── Fallback: wide Y-line detection ───────────────────────────────────────
+    // When the primary histogram check fails, many Y-lines will span the full
+    // page width (items from BOTH columns on the same visual line).  If this
+    // pattern is prominent, the page is almost certainly two-column and the
+    // primary thresholds were just too strict.  Retry with relaxed thresholds.
+    if (splitX === null && bestBucket >= 0) {
+      const Y_CHECK_TOL = 2;
+      const sorted = [...items].sort((a, b) => b.y - a.y || a.x - b.x);
+      const yLines = [];
+      let curLine = [sorted[0]];
+      for (let i = 1; i < sorted.length; i++) {
+        if (Math.abs(sorted[i].y - curLine[0].y) <= Y_CHECK_TOL) {
+          curLine.push(sorted[i]);
+        } else {
+          yLines.push(curLine);
+          curLine = [sorted[i]];
+        }
+      }
+      if (curLine.length) yLines.push(curLine);
+
+      const wideThreshold = (xMax - xMin) * 0.35;
+      const wideCount = yLines.filter(line => {
+        const lxs = line.map(i => i.x);
+        return Math.max(...lxs) - Math.min(...lxs) > wideThreshold;
+      }).length;
+      const wideRatio = wideCount / yLines.length;
+
+      if (wideRatio > 0.25) {
+        // Many Y-lines span both column regions — use the best gap even though
+        // it didn't meet the strict primary thresholds.
+        const gapX = xMin + (bestBucket + 0.5) * bucketWidth;
+        const leftCount  = items.filter(i => i.x <  gapX).length;
+        const rightCount = items.filter(i => i.x >= gapX).length;
+        if (Math.min(leftCount, rightCount) >= 3) {
+          splitX = gapX;
+          splitReason = `fallback(wideRatio=${wideRatio.toFixed(2)},wideLines=${wideCount}/${yLines.length})`;
+        }
       }
     }
 
@@ -374,22 +442,28 @@ export class PDFParser {
         const inRange = cx >= midLo && cx <= midHi;
         return `  b${b.toString().padStart(2)} x=${Math.round(cx).toString().padStart(4)}  n=${String(count).padStart(3)}${inRange ? ' *' : ''}`;
       }).join('\n');
-      const gap = bestBucket >= 0 ? {
-        bucket: bestBucket,
-        centreX: Math.round(xMin + (bestBucket + 0.5) * bucketWidth),
-        count: bestCount,
-        leftMax:  bestBucket > 0           ? Math.max(...hist.slice(0, bestBucket))      : 0,
-        rightMax: bestBucket < BUCKETS - 1 ? Math.max(...hist.slice(bestBucket + 1))     : 0,
-      } : null;
+      const pgNum = items[0]?.pageNum ?? '?';
       console.groupCollapsed(
-        `DAJB columns | ${items.length} items | pageW=${Math.round(pageWidth)}pt | xRange=${Math.round(xMin)}–${Math.round(xMax)} | splitX=${splitX !== null ? Math.round(splitX) : 'none'}`
+        `DAJB columns | p${pgNum} | ${items.length} items | pageW=${Math.round(pageWidth)}pt | xRange=${Math.round(xMin)}–${Math.round(xMax)} | splitX=${splitX !== null ? Math.round(splitX) : 'none'}`
       );
       console.log('Histogram (* = in search range):');
       console.log(bucketCentres);
-      if (gap) {
-        console.log(`Gap candidate: bucket ${gap.bucket} centreX=${gap.centreX}  count=${gap.count}  leftMax=${gap.leftMax}  rightMax=${gap.rightMax}  threshold=${Math.round(Math.min(gap.leftMax, gap.rightMax) * 0.30)}`);
+      if (bestBucket >= 0) {
+        const minFlankDensity = Math.max(2, items.length / BUCKETS * 0.2);
+        const gapX2 = xMin + (bestBucket + 0.5) * bucketWidth;
+        const lc = items.filter(i => i.x <  gapX2).length;
+        const rc = items.filter(i => i.x >= gapX2).length;
+        console.log(
+          `Best gap: b${bestBucket} centreX=${Math.round(gapX2)}  count=${bestCount}` +
+          `  leftMax=${bestLeft}  rightMax=${bestRight}` +
+          `  score=${bestLeft * bestRight}` +
+          `  threshold=${(Math.min(bestLeft, bestRight) * 0.30).toFixed(1)}` +
+          `  sides=${lc}L/${rc}R  minFlank=${minFlankDensity.toFixed(1)}`
+        );
       }
-      console.log(splitX !== null ? `✓ Columns detected, splitX=${Math.round(splitX)}` : '✗ No column gap — Y-sorted single column');
+      console.log(splitX !== null
+        ? `✓ Columns detected (${splitReason}), splitX=${Math.round(splitX)}`
+        : '✗ No column gap — Y-sorted single column');
       {
         const preview = [...items].sort((a, b) => {
           if (splitX !== null) {
@@ -510,12 +584,11 @@ if (rule.xMin != null && (item.xNorm ?? 0) * 100 < rule.xMin) return false;
     const map = new Map();
     for (const item of items) {
       const size = Math.round(item.fontSize * 2) / 2; // round to nearest 0.5 pt
-      const key = `${item.fontName}||${size}||${item.color ?? '#000000'}`;
+      const key = `${item.fontName}||${size}`;
       if (!map.has(key)) {
         map.set(key, {
           fontName: item.fontName || '',
           fontSize: size,
-          color: item.color ?? '#000000',
           isBold:   item.isBold   ?? false,
           isItalic: item.isItalic ?? false,
           count: 0,
@@ -558,16 +631,20 @@ if (rule.xMin != null && (item.xNorm ?? 0) * 100 < rule.xMin) return false;
    * @returns {{ html: string, rowCount: number, colCount: number }}
    */
   static parseTableRegion(items, {
-    firstRowHeader  = true,
-    columnGapMinPt  = 4,
+    firstRowHeader     = true,
+    columnGapMinPt     = 4,
+    columnGapMultiplier = 0,   // if > 0: gap must also be ≥ (median gap × multiplier)
+    maxColumns         = 0,    // if > 0: keep only the N-1 largest gaps (caps column count)
     preserveFormatting = false,
+    maxMarkerWidth     = 6,    // max chars of a valid row-number marker (mirrors detectTableBoundaries)
   } = {}) {
     if (!items?.length) return { html: '', rowCount: 0, colCount: 0 };
 
     const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-    // 1. Sort descending Y (top of page first), then ascending X
-    const sorted = [...items].sort((a, b) => b.y - a.y || a.x - b.x);
+    // 1. Sort by page first, then descending Y (top of page first), then ascending X
+    const sorted = [...items].sort((a, b) =>
+      (a.pageNum ?? 0) - (b.pageNum ?? 0) || b.y - a.y || a.x - b.x);
 
     // Median font size → row-grouping tolerance
     const sizes = sorted.map(i => i.fontSize).filter(Boolean).sort((a, b) => a - b);
@@ -593,12 +670,35 @@ if (rule.xMin != null && (item.xNorm ?? 0) * 100 < rule.xMin) return false;
 
     // 3. Detect column boundaries via X-gap analysis
     const allX = sorted.map(i => i.x).sort((a, b) => a - b);
-    const colBoundaries = []; // x values that divide columns
+
+    // Collect all candidate gaps above the absolute threshold
+    const gapCandidates = [];
     for (let i = 1; i < allX.length; i++) {
-      if (allX[i] - allX[i - 1] > columnGapMinPt) {
-        colBoundaries.push((allX[i] + allX[i - 1]) / 2);
+      const size = allX[i] - allX[i - 1];
+      if (size > columnGapMinPt) {
+        gapCandidates.push({ mid: (allX[i] + allX[i - 1]) / 2, size });
       }
     }
+
+    // Optional: relative threshold — gap must be ≥ median-gap × multiplier
+    let filtered = gapCandidates;
+    if (columnGapMultiplier > 0 && gapCandidates.length > 0) {
+      const allSizes = [...gapCandidates].map(g => g.size).sort((a, b) => a - b);
+      const medianGap = allSizes[Math.floor(allSizes.length / 2)];
+      const relThresh = medianGap * columnGapMultiplier;
+      filtered = gapCandidates.filter(g => g.size >= relThresh);
+    }
+
+    // Optional: cap column count — keep only the N−1 leftmost gaps.
+    // Leftmost rather than largest because structural column boundaries
+    // (e.g. number | description) are always left of any incidental whitespace
+    // gaps that may appear within a wide description column.
+    // filtered is already sorted left→right by mid, so just take the first N-1.
+    if (maxColumns > 0 && filtered.length >= maxColumns) {
+      filtered = filtered.slice(0, maxColumns - 1);
+    }
+
+    const colBoundaries = filtered.map(g => g.mid);
     const colCount = colBoundaries.length + 1;
 
     const colOf = (x) => {
@@ -612,23 +712,44 @@ if (rule.xMin != null && (item.xNorm ?? 0) * 100 < rule.xMin) return false;
     const col0RightEdge = colBoundaries[0] ?? Infinity;
 
     // 4 & 5. Assign items to columns and merge continuation rows
+    const debugPT = PDFParser.debugParseTable === true;
+    if (debugPT) console.log('[DAJB parseTable] colBoundaries=[%s]  colCount=%d  col0RightEdge=%s  maxMarkerWidth=%d',
+      colBoundaries.map(x => x.toFixed(0)).join(', '), colCount, col0RightEdge.toFixed(0), maxMarkerWidth);
+
     const logicalRows = []; // each entry: Array(colCount) of item[]
     for (const vrow of visualRows) {
       const colItems = Array.from({ length: colCount }, () => []);
       for (const item of vrow) colItems[colOf(item.x)].push(item);
 
-      // Continuation: no items in col 0 and leftmost item is right of col0's boundary
-      const isContinuation =
-        logicalRows.length > 0 &&
-        colItems[0].length === 0 &&
-        vrow.length > 0 &&
-        vrow[0].x > col0RightEdge;
+      // Continuation check — two cases:
+      // 1. Standard: nothing in the marker column, leftmost x is past col0's boundary.
+      // 2. Wrapped: description text wrapped back to the marker column's x range,
+      //    so col0 has items but they are long text (not a row-number marker) and col1
+      //    is empty.  Append col0 items to the previous row's last column instead.
+      const col0Text = colItems[0].map(i => i.text).join('').trim();
+      const isStandardCont = logicalRows.length > 0 && vrow.length > 0 &&
+        colItems[0].length === 0 && vrow[0].x > col0RightEdge;
+      const isWrappedCont  = logicalRows.length > 0 &&
+        colItems[0].length > 0 && colItems[1].length === 0 &&
+        col0Text.length > maxMarkerWidth;
 
-      if (isContinuation) {
+      if (debugPT) {
+        const colSummary = colItems.map((ci, idx) =>
+          `col${idx}=[${ci.map(i => `"${i.text.slice(0,15)}"`).join(',')}]`).join('  ');
+        const cont = isStandardCont ? 'STANDARD-CONT' : isWrappedCont ? 'WRAPPED-CONT' : 'NEW-ROW';
+        const why = !isStandardCont && !isWrappedCont
+          ? `(col0Text="${col0Text.slice(0,20)}" len=${col0Text.length} vrow[0].x=${vrow[0]?.x.toFixed(0)} col0RightEdge=${col0RightEdge.toFixed(0)})`
+          : '';
+        console.log('  vrow[%d] → %s  %s  %s', logicalRows.length, cont, colSummary, why);
+      }
+
+      if (isStandardCont) {
         const prev = logicalRows[logicalRows.length - 1];
-        for (let c = 1; c < colCount; c++) {
-          prev[c].push(...colItems[c]);
-        }
+        for (let c = 1; c < colCount; c++) prev[c].push(...colItems[c]);
+      } else if (isWrappedCont) {
+        // Route the wrapped text into the last column of the previous row
+        const prev = logicalRows[logicalRows.length - 1];
+        prev[colCount - 1].push(...colItems[0]);
       } else {
         logicalRows.push(colItems);
       }
@@ -659,6 +780,183 @@ if (rule.xMin != null && (item.xNorm ?? 0) * 100 < rule.xMin) return false;
     html += '</table>';
 
     return { html, rowCount: logicalRows.length, colCount };
+  }
+
+  /**
+   * Geometrically detect numbered-table regions within a flat item array.
+   *
+   * A "table marker line" is a Y-line where:
+   *   - At least one item-gap ≥ colGapPt exists between adjacent items (sorted by x)
+   *   - The text to the LEFT of that gap is ≤ maxLeftWidth characters
+   *     (catches row markers: "1", "d6", "10", "d12", "1,000" etc.)
+   *
+   * A table region is a contiguous run of lines that are either:
+   *   - Marker lines, OR
+   *   - Continuation lines whose leftmost item's x is within xTol of the
+   *     table's running right-column x estimate (wrapping text of the current row)
+   *
+   * When a non-marker, non-continuation line is encountered the region ends.
+   *
+   * @param {Array<{text:string,x:number,y:number}>} items
+   * @param {{yTol?:number, colGapPt?:number, maxLeftWidth?:number, minRows?:number, contXTol?:number}} opts
+   * @returns {Array<Array>} - each element is the array of items belonging to one detected table
+   */
+  static detectTableBoundaries(items, {
+    yTol         = 4,   // pt — items within this range share a Y-line
+    colGapPt     = 12,  // pt — min gap between left marker and right content
+    maxLeftWidth = 6,   // chars — max combined length of left-marker group
+    minRows      = 2,   // minimum table-row (marker) lines required
+    contXTol     = 15,  // pt — tolerance for continuation-line x matching
+    zoneGapPt    = 80,  // pt — x-gap large enough to indicate a separate page column
+    // Marker text must look like a number or dice roll (1, 2, d6, d8, 10, 1,000 …).
+    // This prevents page refs like "(p34)", stray commas, or abbreviations from
+    // being treated as row markers and creating false table regions.
+    markerPattern = /^d?\d{1,3}([,./]\d+)*\.?$/,
+  } = {}) {
+    if (!items?.length) return [];
+
+    const debug = PDFParser.debugDetect === true;
+
+    // Sort by page first, then top-to-bottom (high Y first in PDF coords)
+    const byY = [...items].sort((a, b) =>
+      (a.pageNum ?? 0) - (b.pageNum ?? 0) || b.y - a.y || a.x - b.x);
+
+    // Group into Y-lines
+    const yLines = [];
+    for (const item of byY) {
+      const last = yLines[yLines.length - 1];
+      if (!last || Math.abs(item.y - last[0].y) > yTol) yLines.push([item]);
+      else last.push(item);
+    }
+
+    // Classify a single group of x-adjacent items as a table marker or other
+    const classifyGroup = (group) => {
+      const gsx = [...group].sort((a, b) => a.x - b.x);
+      let gapIdx = -1;
+      for (let i = 1; i < gsx.length; i++) {
+        if (gsx[i].x - gsx[i - 1].x >= colGapPt) { gapIdx = i; break; }
+      }
+      const leftX = gsx[0].x;
+      if (gapIdx < 0) return { items: group, type: 'other', leftX, rightX: null };
+      const leftText = gsx.slice(0, gapIdx).map(t => t.text).join('').trim();
+      const rightX   = gsx[gapIdx].x;
+      return {
+        items:   group,
+        type:    leftText.length <= maxLeftWidth && markerPattern.test(leftText) ? 'marker' : 'other',
+        leftX,
+        rightX,
+      };
+    };
+
+    // Classify each line — split into x-zones first so that a left-column prose
+    // item sharing a Y with a right-column table marker doesn't hide the marker.
+    const tagged = yLines.map(line => {
+      const sx = [...line].sort((a, b) => a.x - b.x);
+
+      // Split line into x-zones separated by large gaps (separate page columns)
+      const zones = [[sx[0]]];
+      for (let i = 1; i < sx.length; i++) {
+        if (sx[i].x - sx[i - 1].x > zoneGapPt) zones.push([sx[i]]);
+        else zones[zones.length - 1].push(sx[i]);
+      }
+
+      if (zones.length === 1) return classifyGroup(zones[0]);
+
+      // Multiple zones: classify each zone; prefer marker over other for the
+      // type / leftX / rightX metadata, but KEEP items from ALL zones.
+      //
+      // Why keep all items: inline styled runs (bold NPC names, italic references)
+      // that appear at the far right of a description line (e.g. x=492 while the
+      // description text starts at x=329) create a second x-zone on that y-line.
+      // If we return only the winning zone's items, the description text at x=329
+      // is silently dropped and reappears as orphan prose below the table.
+      const zoneResults = zones.map(classifyGroup);
+      const markerZone  = zoneResults.find(z => z.type === 'marker');
+      const winner      = markerZone ?? zoneResults[zoneResults.length - 1];
+      return { ...winner, items: zoneResults.flatMap(z => z.items) };
+    });
+
+    if (debug) {
+      console.log('[DAJB detectTable] items=%d  yLines=%d  colGapPt=%d  maxLeftWidth=%d  contXTol=%d  minRows=%d',
+        items.length, yLines.length, colGapPt, maxLeftWidth, contXTol, minRows);
+      tagged.forEach((t, i) => {
+        const preview = t.items.map(it => it.text).join(' ').slice(0, 70);
+        const rx = t.rightX != null ? t.rightX.toFixed(0) : 'null';
+        console.log('  line[%d] %s  leftX=%s  rightX=%s  | %s',
+          i, t.type.toUpperCase().padEnd(6), t.leftX.toFixed(0), rx, preview);
+      });
+    }
+
+    // Walk lines, accumulate table regions
+    const regions = [];
+    let blockStart      = null;
+    let rightColX       = null;  // running estimate of right-column x
+    let leftColX        = null;  // running estimate of left (marker) column x
+    let rightColSamples = 0;
+    let leftColSamples  = 0;
+
+    const flush = (endIdx) => {
+      const slice = tagged.slice(blockStart, endIdx);
+      const markerCount = slice.filter(l => l.type === 'marker').length;
+      const saved = markerCount >= minRows;
+      if (debug) console.log('  → FLUSH lines[%d..%d]  markers=%d  saved=%s', blockStart, endIdx - 1, markerCount, saved);
+      if (saved) regions.push(slice.flatMap(l => l.items));
+      blockStart = null; rightColX = null; leftColX = null;
+      rightColSamples = 0; leftColSamples = 0;
+    };
+
+    for (let i = 0; i < tagged.length; i++) {
+      const { type, rightX, leftX } = tagged[i];
+
+      if (type === 'marker') {
+        if (blockStart === null) blockStart = i;
+        // Update right-column x estimate (running average)
+        if (rightX !== null) {
+          rightColX = rightColSamples === 0 ? rightX
+            : (rightColX * rightColSamples + rightX) / (rightColSamples + 1);
+          rightColSamples++;
+        }
+        // Update left-column x estimate (running average)
+        leftColX = leftColSamples === 0 ? leftX
+          : (leftColX * leftColSamples + leftX) / (leftColSamples + 1);
+        leftColSamples++;
+        if (debug) console.log('    ↳ block active  leftColX=%s  rightColX=%s',
+          leftColX.toFixed(0), rightColX?.toFixed(0) ?? 'null');
+      } else if (blockStart !== null) {
+        // A non-marker line is a continuation if its leftmost x falls anywhere
+        // within the table's horizontal span (leftColX … rightColX ± contXTol).
+        // This handles description text that wraps back to the row-number column's
+        // x position (which can be 15–30 pt left of rightColX, beyond the old check).
+        const textLen = tagged[i].items.map(t => t.text).join('').trim().length;
+        const inSpan = rightColX !== null && leftColX !== null &&
+                       leftX >= leftColX - contXTol &&
+                       leftX <= rightColX + contXTol &&
+                       textLen > maxLeftWidth;
+        const nearRight = rightColX !== null && Math.abs(leftX - rightColX) <= contXTol;
+        // Items whose leftX is far to the RIGHT of rightColX are inline styled
+        // text (italic NPC names, bold references, closing parens) that happen to
+        // appear at the end of a description line.  They are part of the description
+        // and must not terminate the block.
+        const isOutOfBand = rightColX !== null && leftX > rightColX + 50;
+        const isContinuation = inSpan || nearRight || isOutOfBand;
+        if (debug) {
+          const why = isContinuation
+            ? (nearRight ? `nearRight(|${leftX.toFixed(0)}-${rightColX.toFixed(0)}|=${Math.abs(leftX-rightColX).toFixed(0)}≤${contXTol})` : `inSpan(textLen=${textLen})`)
+            : `FAIL nearRight=|${leftX.toFixed(0)}-${(rightColX??0).toFixed(0)}|=${Math.abs(leftX-(rightColX??0)).toFixed(0)}>${contXTol} inSpan=textLen${textLen}${textLen>maxLeftWidth?'>':'≤'}${maxLeftWidth}`;
+          console.log('    ↳ cont=%s  leftX=%s  leftColX=%s  rightColX=%s  textLen=%d  %s',
+            isContinuation, leftX.toFixed(0), leftColX?.toFixed(0)??'null', rightColX?.toFixed(0)??'null', textLen, why);
+        }
+        if (!isContinuation) {
+          flush(i);
+          // Don't increment i — re-evaluate this line as potential new block start
+          i--;
+        }
+        // If continuation: just let it accumulate in the current block (no action needed)
+      }
+    }
+    if (blockStart !== null) flush(tagged.length);
+
+    return regions;
   }
 
   /**

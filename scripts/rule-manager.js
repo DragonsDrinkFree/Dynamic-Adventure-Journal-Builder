@@ -13,7 +13,7 @@ export class RuleManager {
     return {
       id: foundry.utils.randomID(),
       name: "New Rule",
-      // "create-category" | "create-page" | "create-section" | "create-collated-section" | "remove-section" | "strip" | "create-table"
+      // "create-category" | "create-page" | "create-section" | "create-collated-section" | "remove-section" | "strip" | "create-table" | "create-format-text"
       ruleType: "create-section",
       disabled: false,
       // top-level only
@@ -37,10 +37,21 @@ export class RuleManager {
       // Table options (used when ruleType === 'create-table')
       firstRowHeader: true,
       columnGapMinPt: 4,
+      columnGapMultiplier: 0,  // 0 = off; >0 = gap must be ≥ median×multiplier (filters noise)
+      maxColumns: 0,           // 0 = auto; N = cap column count at N (keeps N-1 largest gaps)
+      autoDetect: false,       // create-table: detect table regions geometrically
       outputFormat: {
         headingLevel: 2,
         additionalFormatting: "", // "" | "ul" | "ol" | "blockquote" | "pre" | "secret"
         paragraphDetection: "",   // "" | "spacing" | "indent" | "both"
+      },
+      // Format Text options (used when ruleType === 'create-format-text')
+      formatOptions: {
+        bold: false,
+        underline: false,
+        indent: false,
+        lineReturnBefore: false,
+        lineReturnAfter: false,
       },
       children: [],
       ...overrides,
@@ -208,6 +219,19 @@ export class RuleManager {
       if (rule.ruleType === 'create-table') {
         if (rule.firstRowHeader === undefined) rule.firstRowHeader = true;
         if (rule.columnGapMinPt === undefined) rule.columnGapMinPt = 4;
+        if (rule.autoDetect === undefined) rule.autoDetect = false;
+        if (rule.columnGapMultiplier === undefined) rule.columnGapMultiplier = 0;
+        if (rule.maxColumns === undefined) rule.maxColumns = 0;
+      }
+      // Ensure format-text options exist
+      if (rule.ruleType === 'create-format-text') {
+        if (!rule.formatOptions) rule.formatOptions = {};
+        const fo = rule.formatOptions;
+        if (fo.bold            === undefined) fo.bold            = false;
+        if (fo.underline       === undefined) fo.underline       = false;
+        if (fo.indent          === undefined) fo.indent          = false;
+        if (fo.lineReturnBefore === undefined) fo.lineReturnBefore = false;
+        if (fo.lineReturnAfter  === undefined) fo.lineReturnAfter  = false;
       }
     });
   }
@@ -539,8 +563,8 @@ export class RuleManager {
   static splitOnMultipleRules(items, childRules) {
     if (!items?.length || !childRules?.length) return [];
 
-    // Skip disabled rules and table rules (tables are terminal renderers, not boundary producers)
-    childRules = childRules.filter(r => !r.disabled && r.ruleType !== 'create-table');
+    // Skip disabled rules, table rules, and format-text rules (both are terminal/post-processors, not boundary producers)
+    childRules = childRules.filter(r => !r.disabled && r.ruleType !== 'create-table' && r.ruleType !== 'create-format-text');
     if (!childRules.length) {
       const body = items.map(i => i.text).join(' ').trim();
       return body ? [{ match: null, title: null, body, bodyItems: items, rule: null }] : [];
@@ -747,5 +771,15 @@ export class RuleManager {
   /** Returns the top-level rule that contains the given rule id (or the rule itself). */
   getTopLevelAncestor(id) {
     return this.getPathToRule(id)[0] ?? null;
+  }
+
+  /**
+   * A rule is "effectively disabled" if it is disabled itself OR any ancestor
+   * in the tree is disabled.  This lets parent-disable cascade to children
+   * without mutating the children's own `disabled` flag.
+   */
+  isEffectivelyDisabled(id) {
+    const path = this.getPathToRule(id);
+    return path.some(r => r.disabled);
   }
 }

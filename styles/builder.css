@@ -323,6 +323,40 @@
   white-space: nowrap;
 }
 
+.dajb-rule-type-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+}
+.dajb-rule-type-row select {
+  flex: 1;
+}
+.dajb-rule-level-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  border: 1px solid;
+  letter-spacing: 0.3px;
+}
+.dajb-level-top {
+  background: #1a3a5c;
+  color: #7ab8f5;
+  border-color: #2e5c8a;
+}
+.dajb-level-both {
+  background: #2a3a1a;
+  color: #8fd46a;
+  border-color: #4a6a2a;
+}
+.dajb-level-child {
+  background: #3a2a1a;
+  color: #d4a06a;
+  border-color: #6a4a2a;
+}
+
 .dajb-fieldset legend {
   color: #888;
   font-size: 11px;
@@ -651,20 +685,9 @@ mark.dajb-match {
 .dajb-font-apply-btn:hover { background: #1a3a5a; color: #fff; }
 .dajb-font-name { color: #aaa; font-size: 10px; }
 .dajb-font-size { color: #7ec8e3; white-space: nowrap; }
-.dajb-font-color { white-space: nowrap; font-size: 10px; color: #aaa; }
 .dajb-font-count { color: #888; }
 .dajb-font-sample { color: #666; font-size: 10px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.dajb-color-swatch {
-  display: inline-block;
-  width: 11px;
-  height: 11px;
-  border-radius: 2px;
-  border: 1px solid #555;
-  vertical-align: middle;
-  margin-right: 4px;
-  flex-shrink: 0;
-}
 
 .dajb-color-field {
   display: flex;
