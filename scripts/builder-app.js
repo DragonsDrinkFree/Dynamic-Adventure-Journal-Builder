@@ -725,6 +725,18 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         ?? rule.children?.find(c => c.ruleType === 'create-table' && !c.disabled)
         ?? null;
 
+      // Inheritable siblings: table and format-text rules carry down into
+      // sub-sections so they cooperate with section-splitting children.
+      const inheritableChildren = rule.children?.filter(c =>
+        !c.disabled &&
+        (c.ruleType === 'create-table' || c.ruleType === 'create-format-text') &&
+        c !== childRule
+      ) ?? [];
+      const mergeRule = (r) =>
+        inheritableChildren.length
+          ? { ...r, children: [...(r.children ?? []), ...inheritableChildren] }
+          : r;
+
       if (sectionChildRules.length > 1) {
         // Multi-child mode: boundaries from all rules merged in position order
         const tagged = RuleManager.splitOnMultipleRules(strippedItems, sectionChildRules);
@@ -744,7 +756,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             }
             const hasGC = cr.children?.some(c => c.ruleType !== 'strip');
             if (hasGC) {
-              for (const s of secs) groupEl.appendChild(this._buildSectionEl(s, cr, depth + 1));
+              for (const s of secs) groupEl.appendChild(this._buildSectionEl(s, mergeRule(cr), depth + 1));
             } else {
               const crAF   = cr.outputFormat?.additionalFormatting ?? '';
               const isList = crAF === 'ul' || crAF === 'ol';
@@ -770,7 +782,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         for (const sec of tagged) {
           if (sec.match === null) {
             flushCollate();
-            if (sec.body) el.appendChild(this._buildSectionEl(sec, { children: [] }, depth + 1));
+            if (sec.body) el.appendChild(this._buildSectionEl(sec, { children: [...inheritableChildren] }, depth + 1));
             continue;
           }
           const r = sec.rule;
@@ -791,7 +803,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             el.appendChild(removedEl);
           } else {
             flushCollate();
-            el.appendChild(this._buildSectionEl(sec, r, depth + 1));
+            el.appendChild(this._buildSectionEl(sec, mergeRule(r), depth + 1));
           }
         }
         flushCollate();
@@ -805,7 +817,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         const hasGrandchildren = childRule.children?.some(c => c.ruleType !== 'strip');
         // preamble prose
         const preamble = childSections.find(s => s.match === null);
-        if (preamble?.body) el.appendChild(this._buildSectionEl(preamble, childRule, depth + 1));
+        if (preamble?.body) el.appendChild(this._buildSectionEl(preamble, mergeRule(childRule), depth + 1));
         if (matches.length) {
           const groupEl = document.createElement('div');
           groupEl.className = 'dajb-preview-collate-group';
@@ -818,7 +830,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           if (hasGrandchildren) {
             // Show each match as its own section so grandchild previews render
             for (const childSec of matches) {
-              groupEl.appendChild(this._buildSectionEl(childSec, childRule, depth + 1));
+              groupEl.appendChild(this._buildSectionEl(childSec, mergeRule(childRule), depth + 1));
             }
           } else {
             // No grandchildren — compact inline rendering with selectable spans
@@ -1001,7 +1013,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       } else if (childRule) {
         const childSections = RuleManager.splitOnCombinedTargeting(strippedItems, childRule);
         for (const childSec of childSections) {
-          el.appendChild(this._buildSectionEl(childSec, childRule, depth + 1));
+          el.appendChild(this._buildSectionEl(childSec, mergeRule(childRule), depth + 1));
         }
       } else {
         const bodyEl = document.createElement("div");

@@ -363,13 +363,7 @@ export class PDFParser {
       if (centre < midLo || centre > midHi) continue;
       const lm = Math.max(...hist.slice(0, b));
       const rm = Math.max(...hist.slice(b + 1));
-      // Balance factor: penalise lopsided splits so that margin/indent
-      // boundaries (which put most content on one side) lose to the true
-      // column gap (which splits content roughly evenly).
-      const leftSum  = hist.slice(0, b).reduce((a, c) => a + c, 0);
-      const rightSum = hist.slice(b + 1).reduce((a, c) => a + c, 0);
-      const balance  = Math.min(leftSum, rightSum) / (Math.max(leftSum, rightSum) || 1);
-      const score = lm * rm * balance;
+      const score = lm * rm;
       if (score > bestScore ||
           (score === bestScore && hist[b] < hist[bestBucket])) {
         bestScore  = score;
@@ -387,10 +381,14 @@ export class PDFParser {
       const leftCount  = items.filter(i => i.x <  gapX).length;
       const rightCount = items.filter(i => i.x >= gapX).length;
       const minFlankDensity = Math.max(2, items.length / BUCKETS * 0.2);
+      // Minimum balance: reject lopsided splits where the smaller side has
+      // <30% of total items — these are margin/indent boundaries, not column gaps.
+      const minBalance = Math.min(leftCount, rightCount) / items.length;
       if (bestLeft  >= minFlankDensity &&
           bestRight >= minFlankDensity &&
           bestCount < Math.min(bestLeft, bestRight) * 0.30 &&
-          Math.min(leftCount, rightCount) >= 10) {
+          Math.min(leftCount, rightCount) >= 10 &&
+          minBalance >= 0.30) {
         splitX = gapX;
         splitReason = 'primary';
       }
@@ -502,28 +500,67 @@ export class PDFParser {
     // normalise rather than returning items as-is.
     if (splitX === null) return sortColumn([...items]);
 
-    // Assign each item to its column purely by x position.
-    // Do NOT use y-line spanning detection — parallel column content at the
-    // same Y would be misclassified as a "spanning header" and incorrectly
-    // hoisted to the top of output.  True full-width headers start from the
-    // left margin (x < splitX) and will naturally sort to the top of the left
-    // column via the Y-descending sort inside sortColumn.
+    // ── Spanning-header detection ──────────────────────────────────────────
+    // Scan Y-lines from the top of the page.  A contiguous run of Y-lines
+    // that have items on BOTH sides of splitX are "spanning header" lines
+    // (e.g. a page title on the left + hex code on the right).  These items
+    // are kept in natural reading order (top-to-bottom, left-to-right) and
+    // emitted BEFORE the column-split body.  Once a Y-line appears that has
+    // items exclusively on one side, columns have begun and all subsequent
+    // items are split left/right as usual.
+    const sortedByY = [...items].sort((a, b) => b.y - a.y || a.x - b.x);
+    const hdrLines = [];
+    let curHdrLine = [sortedByY[0]];
+    for (let i = 1; i < sortedByY.length; i++) {
+      if (Math.abs(sortedByY[i].y - curHdrLine[0].y) <= Y_TOL) {
+        curHdrLine.push(sortedByY[i]);
+      } else {
+        hdrLines.push(curHdrLine);
+        curHdrLine = [sortedByY[i]];
+      }
+    }
+    if (curHdrLine.length) hdrLines.push(curHdrLine);
+
+    let headerEndIdx = 0;
+    for (let i = 0; i < hdrLines.length; i++) {
+      const hasLeft  = hdrLines[i].some(item => item.x < splitX);
+      const hasRight = hdrLines[i].some(item => item.x >= splitX);
+      if (hasLeft && hasRight) {
+        headerEndIdx = i + 1;
+      } else {
+        break; // first non-spanning Y-line → columns begin
+      }
+    }
+
+    const headerItems = [];
+    const columnItems = [];
+    for (let i = 0; i < hdrLines.length; i++) {
+      if (i < headerEndIdx) headerItems.push(...hdrLines[i]);
+      else                  columnItems.push(...hdrLines[i]);
+    }
+
+    const sortedHeader = sortColumn(headerItems);
+
     const leftItems  = [];
     const rightItems = [];
-    for (const item of items) {
+    for (const item of columnItems) {
       if (item.x >= splitX) rightItems.push(item);
       else                  leftItems.push(item);
     }
 
     const finalLeft  = sortColumn(leftItems);
     const finalRight = sortColumn(rightItems);
-    const finalOut   = [...finalLeft, ...finalRight];
+    const finalOut   = [...sortedHeader, ...finalLeft, ...finalRight];
 
     if (PDFParser.debugColumns) {
       const fmt = arr => arr.slice(0, 15).map(i =>
         `  x=${Math.round(i.x).toString().padStart(4)}  y=${Math.round(i.y).toString().padStart(4)}  ${i.text.slice(0, 60)}`
       ).join('\n');
-      console.groupCollapsed(`DAJB split detail | left=${finalLeft.length} right=${finalRight.length}`);
+      console.groupCollapsed(`DAJB split detail | hdr=${sortedHeader.length} left=${finalLeft.length} right=${finalRight.length}`);
+      if (sortedHeader.length) {
+        console.log(`── HEADER (${sortedHeader.length} spanning items, ${headerEndIdx} Y-lines):`);
+        console.log(fmt(sortedHeader));
+      }
       console.log('── LEFT (first 15 in output order):');
       console.log(fmt(finalLeft));
       console.log('── RIGHT (first 15 in output order):');

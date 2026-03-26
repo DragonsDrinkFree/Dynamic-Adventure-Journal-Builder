@@ -130,6 +130,17 @@ export class JournalCreator {
 
     const primaryChild = pageChild ?? sectionChildren[0] ?? null;
 
+    // Inheritable siblings: table and format-text rules carry down into
+    // sub-sections so they cooperate with section-splitting children.
+    const inheritableChildren = [
+      ...(tableChild ? [tableChild] : []),
+      ...formatTextRules,
+    ];
+    const mergeChildren = (ownChildren) =>
+      inheritableChildren.length
+        ? [...(ownChildren ?? []), ...inheritableChildren]
+        : (ownChildren ?? []);
+
     // create-table child: parse body items geometrically into an HTML table.
     // If the table rule has font/regex targeting, use it to locate where the
     // table starts — items before the first match are emitted as preamble prose.
@@ -245,8 +256,15 @@ export class JournalCreator {
     const namedSecs = sections.filter(s => s.match !== null);
 
     // Render a body segment (preamble or inter-section text)
-    const renderBody = (seg) => {
+    const renderBody = async (seg) => {
       if (!seg.body && !seg.bodyItems?.length) return "";
+      // When inheritable siblings exist, process preamble/inter-section text
+      // through _buildBodyHTML so table detection and format-text apply.
+      if (inheritableChildren.length && seg.bodyItems?.length) {
+        return JournalCreator._buildBodyHTML(
+          seg.body, seg.bodyItems, inheritableChildren, pdfParser, parentRanges, journal, preserveFormatting, paragraphDetection
+        );
+      }
       if (childPF && seg.bodyItems?.length) return `<p>${PDFParser.itemsToHTML(seg.bodyItems)}</p>`;
       return seg.body ? `<p>${seg.body}</p>` : "";
     };
@@ -259,12 +277,12 @@ export class JournalCreator {
       }
       for (const sec of namedSecs) {
         const subHTML = await JournalCreator._buildBodyHTML(
-          sec.body, sec.bodyItems, primaryChild.children, pdfParser, parentRanges, journal, childPF, childPD
+          sec.body, sec.bodyItems, mergeChildren(primaryChild.children), pdfParser, parentRanges, journal, childPF, childPD
         );
         const pageData = {
           name: sec.title,
           type: "text",
-          text: { content: subHTML || renderBody(sec), format: 1 },
+          text: { content: subHTML || await renderBody(sec), format: 1 },
         };
         if (primaryChild.targetCategory && categoryMap.has(primaryChild.targetCategory)) {
           pageData.category = categoryMap.get(primaryChild.targetCategory);
@@ -295,7 +313,7 @@ export class JournalCreator {
         const titleHTML = rl > 0 ? `<h${rl}>${rule.groupName}</h${rl}>` : '';
         const parts = [];
         for (const s of secs) {
-          const sub = await JournalCreator._buildBodyHTML(s.body, s.bodyItems, rule.children, pdfParser, parentRanges, journal, cPF, cPD);
+          const sub = await JournalCreator._buildBodyHTML(s.body, s.bodyItems, mergeChildren(rule.children), pdfParser, parentRanges, journal, cPF, cPD);
           const body = sub || (s.body ? `<p>${s.body}</p>` : '');
           const tp = s.title ? `<strong>${s.title}</strong>` : '';
           if (isList) {
@@ -327,7 +345,11 @@ export class JournalCreator {
       for (const sec of tagged) {
         if (sec.match === null) {
           await flushAll();
-          if (sec.body) html += `<p>${sec.body}</p>`;
+          if (inheritableChildren.length && sec.bodyItems?.length) {
+            html += await JournalCreator._buildBodyHTML(sec.body, sec.bodyItems, inheritableChildren, pdfParser, parentRanges, journal, preserveFormatting, paragraphDetection);
+          } else if (sec.body) {
+            html += `<p>${sec.body}</p>`;
+          }
           continue;
         }
         const r = sec.rule;
@@ -343,7 +365,7 @@ export class JournalCreator {
           const rIsList = rAF === 'ul' || rAF === 'ol';
           const cPF = r.preserveFormatting ?? preserveFormatting;
           const rPD = r.outputFormat?.paragraphDetection ?? "";
-          const sub = await JournalCreator._buildBodyHTML(sec.body, sec.bodyItems, r.children, pdfParser, parentRanges, journal, cPF, rPD);
+          const sub = await JournalCreator._buildBodyHTML(sec.body, sec.bodyItems, mergeChildren(r.children), pdfParser, parentRanges, journal, cPF, rPD);
           const body = sub || (sec.body ? `<p>${sec.body}</p>` : '');
           const titleTag = rl > 0 ? `<h${rl}>${sec.title}</h${rl}>` : `<strong>${sec.title}</strong>`;
           if (rIsList) {
@@ -385,7 +407,7 @@ export class JournalCreator {
     if (primaryChild.ruleType === 'remove-section') {
       let html = "";
       for (const sec of sections) {
-        if (sec.match === null) html += renderBody(sec);
+        if (sec.match === null) html += await renderBody(sec);
         // matched sections are silently dropped
       }
       return html || (text ? `<p>${text}</p>` : "");
@@ -400,11 +422,11 @@ export class JournalCreator {
       let html = "";
       const collectedHTML = [];
       for (const sec of sections) {
-        if (sec.match === null) { html += renderBody(sec); continue; }
+        if (sec.match === null) { html += await renderBody(sec); continue; }
         const subBody = await JournalCreator._buildBodyHTML(
-          sec.body, sec.bodyItems, primaryChild.children, pdfParser, parentRanges, journal, childPF, childPD
+          sec.body, sec.bodyItems, mergeChildren(primaryChild.children), pdfParser, parentRanges, journal, childPF, childPD
         );
-        const bodyContent = subBody || renderBody(sec);
+        const bodyContent = subBody || await renderBody(sec);
         const titlePart = sec.title ? `<strong>${sec.title}</strong>` : '';
         if (isList) {
           const bodyInner = hasGrandchildren ? bodyContent : inlineBody(bodyContent);
@@ -433,11 +455,11 @@ export class JournalCreator {
     if (af) {
       let html = "";
       for (const sec of sections) {
-        if (sec.match === null) { html += renderBody(sec); continue; }
+        if (sec.match === null) { html += await renderBody(sec); continue; }
         const subBody = await JournalCreator._buildBodyHTML(
-          sec.body, sec.bodyItems, primaryChild.children, pdfParser, parentRanges, journal, childPF, childPD
+          sec.body, sec.bodyItems, mergeChildren(primaryChild.children), pdfParser, parentRanges, journal, childPF, childPD
         );
-        const body = subBody || renderBody(sec);
+        const body = subBody || await renderBody(sec);
         if (isList) {
           const bodyInner = body.replace(/^<p>([\s\S]*?)<\/p>$/i, '$1').trim();
           const titleTag = level > 0 ? `<h${level}>${sec.title}</h${level}>` : `<strong>${sec.title}</strong>`;
@@ -452,11 +474,11 @@ export class JournalCreator {
     // Heading mode (default): each match becomes a heading + body block
     let html = "";
     for (const sec of sections) {
-      if (sec.match === null) { html += renderBody(sec); continue; }
+      if (sec.match === null) { html += await renderBody(sec); continue; }
       const subBody = await JournalCreator._buildBodyHTML(
-        sec.body, sec.bodyItems, primaryChild.children, pdfParser, parentRanges, journal, childPF, childPD
+        sec.body, sec.bodyItems, mergeChildren(primaryChild.children), pdfParser, parentRanges, journal, childPF, childPD
       );
-      const body = subBody || renderBody(sec);
+      const body = subBody || await renderBody(sec);
       html += level === 0 ? body : `<h${level}>${sec.title}</h${level}>` + body;
     }
     return html || (preserveFormatting && cleanedItems.length ? `<p>${PDFParser.itemsToHTML(cleanedItems)}</p>` : (text ? `<p>${text}</p>` : ""));
