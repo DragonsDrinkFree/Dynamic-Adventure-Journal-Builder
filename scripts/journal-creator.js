@@ -261,7 +261,7 @@ export class JournalCreator {
       // When inheritable siblings exist, process preamble/inter-section text
       // through _buildBodyHTML so table detection and format-text apply.
       if (inheritableChildren.length && seg.bodyItems?.length) {
-        return JournalCreator._buildBodyHTML(
+        return await JournalCreator._buildBodyHTML(
           seg.body, seg.bodyItems, inheritableChildren, pdfParser, parentRanges, journal, preserveFormatting, paragraphDetection
         );
       }
@@ -516,33 +516,6 @@ export class JournalCreator {
       }
     }
     return result;
-  }
-
-  // ── Text helpers ──────────────────────────────────────────────────────────
-
-  static async _getTextForRule(rule, pdfParser, ranges) {
-    const hasFontFilter = rule.fontSize != null || rule.fontNameContains;
-    if (hasFontFilter) {
-      const items = await pdfParser.getPagesItems(ranges);
-      const filtered = PDFParser.filterByCriteria(items, rule);
-      return PDFParser.itemsToText(filtered);
-    }
-    return pdfParser.getPagesText(ranges);
-  }
-
-  /**
-   * For child rules: if the child has a font size filter, apply it to the
-   * parent page items (not the already-filtered child text).
-   * Otherwise return the text as-is.
-   */
-  static async _getFilteredText(text, rule, pdfParser, parentRanges) {
-    const hasFontFilter = rule.fontSize != null || rule.fontNameContains;
-    if (hasFontFilter && parentRanges && pdfParser) {
-      const items = await pdfParser.getPagesItems(parentRanges);
-      const filtered = PDFParser.filterByCriteria(items, rule);
-      return PDFParser.itemsToText(filtered);
-    }
-    return text;
   }
 
   // ── Foundry document helpers ──────────────────────────────────────────────

@@ -95,7 +95,7 @@ export class RuleManager {
     this._walk(this.rules, (rule) => {
       if (deleted) return;
       const idx = rule.children?.findIndex((c) => c.id === id);
-      if (idx !== undefined && idx !== -1) {
+      if (idx !== -1) {
         rule.children.splice(idx, 1);
         deleted = true;
       }
@@ -125,7 +125,7 @@ export class RuleManager {
       this._walk(this.rules, (rule) => {
         if (target) return;
         const idx = rule.children?.findIndex((c) => c.id === id);
-        if (idx !== undefined && idx !== -1) {
+        if (idx !== -1) {
           [target] = rule.children.splice(idx, 1);
         }
       });

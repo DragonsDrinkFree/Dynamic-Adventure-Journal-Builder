@@ -60,6 +60,70 @@ export class PDFParser {
   static debugColumns = false;
   /** Set PDFParser.debugDetect = true in the console to log detectTableBoundaries internals. */
   static debugDetect  = false;
+  /** Set PDFParser.debugParseTable = true in the console to log parseTableRegion internals. */
+  static debugParseTable = false;
+
+  /**
+   * Character replacement map applied during text extraction.
+   * Handles common PDF.js glyph-mapping failures (ligatures, zero-width chars,
+   * Private Use Area codepoints from custom fonts).
+   *
+   * Add custom mappings from the console:
+   *   PDFParser.charReplacements.set('\uE001', 'é');
+   * Or for bulk additions:
+   *   Object.entries({'\uE001':'é', '\uE002':'è'}).forEach(([k,v]) => PDFParser.charReplacements.set(k,v));
+   *
+   * After changing the map, re-open the PDF or clear the cache to see effects.
+   */
+  static charReplacements = new Map([
+    // Common ligatures (some PDFs use these instead of individual chars)
+    ['\uFB00', 'ff'],
+    ['\uFB01', 'fi'],
+    ['\uFB02', 'fl'],
+    ['\uFB03', 'ffi'],
+    ['\uFB04', 'ffl'],
+    ['\uFB05', 'st'],
+    ['\uFB06', 'st'],
+    // Zero-width / invisible characters
+    ['\u00AD', ''],      // soft hyphen
+    ['\u200B', ''],      // zero-width space
+    ['\u200C', ''],      // zero-width non-joiner
+    ['\u200D', ''],      // zero-width joiner
+    ['\uFEFF', ''],      // BOM / zero-width no-break space
+  ]);
+
+  /**
+   * Normalise a text string using the charReplacements map.
+   * Also flags Private Use Area codepoints (U+E000–U+F8FF) that have no
+   * mapping — these are logged once so the user knows which codepoints to add.
+   */
+  static normalizeText(str) {
+    if (!str) return str;
+    let result = str;
+    for (const [from, to] of PDFParser.charReplacements) {
+      if (result.includes(from)) result = result.replaceAll(from, to);
+    }
+    // Detect unmapped Private Use Area characters and warn once per codepoint
+    for (let i = 0; i < result.length; i++) {
+      const code = result.charCodeAt(i);
+      if (code >= 0xE000 && code <= 0xF8FF) {
+        const hex = `\\u${code.toString(16).toUpperCase().padStart(4, '0')}`;
+        if (!PDFParser._warnedPUA.has(code)) {
+          PDFParser._warnedPUA.add(code);
+          const context = str.slice(Math.max(0, i - 10), i + 10);
+          console.warn(
+            `DAJB | Unmapped Private Use Area character ${hex} in: "${context}"` +
+            `\n  → Add a mapping: PDFParser.charReplacements.set('${hex}', 'replacement');`
+          );
+        }
+      }
+    }
+    return result;
+  }
+  static _warnedPUA = new Set();
+
+  /** Clear the item cache so new charReplacements take effect on next preview. */
+  clearItemCache() { this._itemCache.clear(); this._cache.clear(); PDFParser._warnedPUA.clear(); }
 
   constructor() {
     /** @type {Object|null} PDF.js document proxy */
@@ -99,6 +163,7 @@ export class PDFParser {
     this._cache.clear();
     this._itemCache.clear();
     this._pageWidths.clear();
+    PDFParser._warnedPUA.clear();
     console.log(`DAJB | PDF loaded: ${file.name} (${this._totalPages} pages)`);
     return this._totalPages;
   }
@@ -161,7 +226,7 @@ export class PDFParser {
         const fn = fontName.toLowerCase();
         const hasText = typeof item.str === 'string' && item.str.trim();
         const rawX = item.transform?.[4] ?? 0;
-        return { _keep: !!hasText, text: item.str, fontSize: Math.round(Math.abs(item.transform?.[3] ?? 0) * 100) / 100,
+        return { _keep: !!hasText, text: PDFParser.normalizeText(item.str), fontSize: Math.round(Math.abs(item.transform?.[3] ?? 0) * 100) / 100,
           fontName,
           x: rawX,
           y: item.transform?.[5] ?? 0,
@@ -605,7 +670,7 @@ export class PDFParser {
       if (rule.maxFontSize != null && item.fontSize > rule.maxFontSize) return false;
       if (rule.fontNameContains &&
           !item.fontName?.toLowerCase().includes(rule.fontNameContains.toLowerCase())) return false;
-if (rule.xMin != null && (item.xNorm ?? 0) * 100 < rule.xMin) return false;
+      if (rule.xMin != null && (item.xNorm ?? 0) * 100 < rule.xMin) return false;
       if (rule.xMax != null && (item.xNorm ?? 0) * 100 > rule.xMax) return false;
       return true;
     });
@@ -784,9 +849,9 @@ if (rule.xMin != null && (item.xNorm ?? 0) * 100 < rule.xMin) return false;
         const prev = logicalRows[logicalRows.length - 1];
         for (let c = 1; c < colCount; c++) prev[c].push(...colItems[c]);
       } else if (isWrappedCont) {
-        // Route the wrapped text into the last column of the previous row
+        // Route the wrapped text into column 1 (or last column for 2-col tables)
         const prev = logicalRows[logicalRows.length - 1];
-        prev[colCount - 1].push(...colItems[0]);
+        prev[Math.min(1, colCount - 1)].push(...colItems[0]);
       } else {
         logicalRows.push(colItems);
       }
@@ -800,12 +865,13 @@ if (rule.xMin != null && (item.xNorm ?? 0) * 100 < rule.xMin) return false;
         : esc(cellItems.map(i => i.text).join(' '));
     };
 
+    const hasBody = logicalRows.length > (firstRowHeader ? 1 : 0);
     let html = '<table>\n';
     for (let r = 0; r < logicalRows.length; r++) {
       const isHeader = firstRowHeader && r === 0;
       const tag = isHeader ? 'th' : 'td';
       if (isHeader) html += '  <thead>\n';
-      else if (r === 1 && firstRowHeader) html += '  <tbody>\n';
+      else if (r === 1 && firstRowHeader && hasBody) html += '  <tbody>\n';
       html += '    <tr>';
       for (let c = 0; c < colCount; c++) {
         html += `<${tag}>${renderCell(logicalRows[r][c])}</${tag}>`;
@@ -813,7 +879,7 @@ if (rule.xMin != null && (item.xNorm ?? 0) * 100 < rule.xMin) return false;
       html += '</tr>\n';
       if (isHeader) html += '  </thead>\n';
     }
-    if (logicalRows.length > (firstRowHeader ? 1 : 0)) html += '  </tbody>\n';
+    if (hasBody) html += '  </tbody>\n';
     html += '</table>';
 
     return { html, rowCount: logicalRows.length, colCount };
@@ -845,10 +911,11 @@ if (rule.xMin != null && (item.xNorm ?? 0) * 100 < rule.xMin) return false;
     minRows      = 2,   // minimum table-row (marker) lines required
     contXTol     = 15,  // pt — tolerance for continuation-line x matching
     zoneGapPt    = 80,  // pt — x-gap large enough to indicate a separate page column
-    // Marker text must look like a number or dice roll (1, 2, d6, d8, 10, 1,000 …).
+    // Marker text must look like a number, dice roll, or Roman numeral.
+    // Matches: 1, 01, 001, d6, d8, 10, 1,000, i, ii, iv, xi, etc.
     // This prevents page refs like "(p34)", stray commas, or abbreviations from
     // being treated as row markers and creating false table regions.
-    markerPattern = /^d?\d{1,3}([,./]\d+)*\.?$/,
+    markerPattern = /^(d?\d{1,4}([,./]\d+)*\.?|[ivxlc]{1,6}\.?)$/i,
   } = {}) {
     if (!items?.length) return [];
 

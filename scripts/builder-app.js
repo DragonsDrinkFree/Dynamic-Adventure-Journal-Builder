@@ -68,13 +68,34 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     };
   }
 
-  _onRender(context, options) {
-    // ApplicationV2: super._onRender may not exist on all versions; call safely
-    if (typeof super._onRender === "function") super._onRender(context, options);
+  /** Refresh all three panels. Call after any rule/state change. */
+  _refreshAllPanels() {
     this._renderRulesTree();
     this._renderEditor();
     this._renderPreview();
+  }
+
+  _onRender(context, options) {
+    // ApplicationV2: super._onRender may not exist on all versions; call safely
+    if (typeof super._onRender === "function") super._onRender(context, options);
+    this._refreshAllPanels();
     this._setupSelectionListener();
+  }
+
+  /** Clean up global listeners and pending timers when the window closes. */
+  _onClose(options) {
+    if (this._selectionChangeBound) {
+      document.removeEventListener("selectionchange", this._selectionChangeBound);
+      this._selectionChangeBound = null;
+    }
+    if (this._previewClickBound) {
+      this.element?.removeEventListener("click", this._previewClickBound);
+      this._previewClickBound = null;
+    }
+    this._dismissSelectionToolbar();
+    if (this._selectionDebounce) { clearTimeout(this._selectionDebounce); this._selectionDebounce = null; }
+    if (this._previewRefreshTimer) { clearTimeout(this._previewRefreshTimer); this._previewRefreshTimer = null; }
+    if (typeof super._onClose === "function") super._onClose(options);
   }
 
   // ── Rules Tree ────────────────────────────────────────────────────────────
@@ -1107,9 +1128,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         const text = await file.text();
         this.ruleManager.loadFromJSON(text);
         this.selectedRuleId = null;
-        this._renderRulesTree();
-        this._renderEditor();
-        this._renderPreview();
+        this._refreshAllPanels();
         ui.notifications.info("DAJB | Rules loaded.");
       } catch (e) {
         ui.notifications.error(`DAJB | Failed to load rules: ${e.message}`);
@@ -1136,9 +1155,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
   static _onAddTopRule(event, target) {
     const rule = this.ruleManager.createRule(null);
     this.selectedRuleId = rule.id;
-    this._renderRulesTree();
-    this._renderEditor();
-    this._renderPreview();
+    this._refreshAllPanels();
   }
 
   static _onAddChildRule(event, target) {
@@ -1148,21 +1165,16 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     }
     const child = this.ruleManager.createRule(this.selectedRuleId);
     this.selectedRuleId = child.id;
-    this._renderRulesTree();
-    this._renderEditor();
-    this._renderPreview();
+    this._refreshAllPanels();
   }
 
   static _onAddSiblingRule(event, target) {
     if (!this.selectedRuleId) return;
     const path = this.ruleManager.getPathToRule(this.selectedRuleId);
-    // path = [topLevel, ..., current] — parent is second-to-last, or null if top-level
     const parentId = path.length > 1 ? path[path.length - 2].id : null;
     const sibling = this.ruleManager.createRule(parentId);
     this.selectedRuleId = sibling.id;
-    this._renderRulesTree();
-    this._renderEditor();
-    this._renderPreview();
+    this._refreshAllPanels();
   }
 
   static _onDeleteRule(event, target) {
@@ -1171,9 +1183,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     if (!rule) return;
     this.ruleManager.deleteRule(this.selectedRuleId);
     this.selectedRuleId = null;
-    this._renderRulesTree();
-    this._renderEditor();
-    this._renderPreview();
+    this._refreshAllPanels();
   }
 
   static _onSelectRule(event, target) {
@@ -1483,9 +1493,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
     this.ruleManager.updateRule(rule.id, { name: "New rule from selection", ruleType: "create-section", ...overrides });
     this.selectedRuleId = rule.id;
-    this._renderRulesTree();
-    this._renderEditor();
-    this._renderPreview();
+    this._refreshAllPanels();
     ui.notifications?.info("DAJB | Rule created from selection — adjust type and pattern as needed.");
   }
 
