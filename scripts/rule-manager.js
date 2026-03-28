@@ -28,7 +28,6 @@ export class RuleManager {
       fontSize: null,
       minFontSize: null,
       maxFontSize: null,
-      fontNameContains: "",
       // output
       outputTemplate: "{{match}}",
       preserveFormatting: false,
@@ -314,7 +313,7 @@ export class RuleManager {
    */
   static hasFontTargeting(rule) {
     if (!rule || rule.pattern) return false;
-    return rule.fontSize != null || !!rule.fontNameContains;
+    return rule.fontSize != null;
   }
 
   /** Test whether a single PDF text item satisfies this rule's font criteria. */
@@ -329,8 +328,6 @@ export class RuleManager {
         if (Math.floor(item.fontSize) !== Math.floor(rule.fontSize)) return false;
       }
     }
-    if (rule.fontNameContains &&
-        !item.fontName?.toLowerCase().includes(rule.fontNameContains.toLowerCase())) return false;
     return true;
   }
 
@@ -403,7 +400,7 @@ export class RuleManager {
   static splitOnCombinedTargeting(items, rule) {
     if (!items?.length) return [];
 
-    const hasFontCriteria = rule.fontSize != null || rule.minFontSize != null || rule.maxFontSize != null || !!rule.fontNameContains;
+    const hasFontCriteria = rule.fontSize != null || rule.minFontSize != null || rule.maxFontSize != null;
     const hasPattern = !!rule.pattern;
 
     // No targeting at all: everything is body
@@ -687,7 +684,7 @@ export class RuleManager {
   }
 
   static _applyStrip(items, rule) {
-    const hasFontCriteria = rule.fontSize != null || rule.minFontSize != null || rule.maxFontSize != null || !!rule.fontNameContains;
+    const hasFontCriteria = rule.fontSize != null || rule.minFontSize != null || rule.maxFontSize != null;
     const hasPattern = !!rule.pattern;
     if (!hasFontCriteria && !hasPattern) return items;
 

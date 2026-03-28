@@ -158,6 +158,7 @@ export class PDFParser {
     const arrayBuffer = await file.arrayBuffer();
     const typedArray = new Uint8Array(arrayBuffer);
 
+    await this._doc?.destroy();
     this._doc = await pdfjsLib.getDocument({ data: typedArray }).promise;
     this._totalPages = this._doc.numPages;
     this._cache.clear();
@@ -668,8 +669,6 @@ export class PDFParser {
       // Legacy min/max fields (from old saved rule files)
       if (rule.minFontSize != null && item.fontSize < rule.minFontSize) return false;
       if (rule.maxFontSize != null && item.fontSize > rule.maxFontSize) return false;
-      if (rule.fontNameContains &&
-          !item.fontName?.toLowerCase().includes(rule.fontNameContains.toLowerCase())) return false;
       if (rule.xMin != null && (item.xNorm ?? 0) * 100 < rule.xMin) return false;
       if (rule.xMax != null && (item.xNorm ?? 0) * 100 > rule.xMax) return false;
       return true;

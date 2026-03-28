@@ -29,7 +29,6 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       "delete-rule":   function(ev, t) { BuilderApp._onDeleteRule.call(this, ev, t); },
       "select-rule":   function(ev, t) { BuilderApp._onSelectRule.call(this, ev, t); },
       "collapse-rule":    function(ev, t) { BuilderApp._onCollapseRule.call(this, ev, t); },
-      "inspect-fonts":    function(ev, t) { BuilderApp._onInspectFonts.call(this, ev, t); },
       "move-rule-up":     function(ev, t) { BuilderApp._onMoveRuleUp.call(this, ev, t); },
       "move-rule-down":   function(ev, t) { BuilderApp._onMoveRuleDown.call(this, ev, t); },
     },
@@ -51,7 +50,6 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     this.selectedRuleId = null;
     this._pdfFileName = null;
     this._collapsedIds = new Set();
-    this._inspectingFonts = false;
     this._selectionToolbar = null;
     this._selectionChangeBound = null;
     this._selectionDebounce = null;
@@ -258,11 +256,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             ${rule.maxFontSize != null ? `<span class="dajb-font-size-max-label">max</span><input type="number" data-field="maxFontSize" value="${rule.maxFontSize}" min="0" step="0.5" class="dajb-font-size-input" />` : ''}
           </div>
         </label>
-        <label class="dajb-field">
-          <span>Font Name Contains</span>
-          <input type="text" data-field="fontNameContains" value="${this._esc(rule.fontNameContains ?? '')}" placeholder="e.g. Bold, Garamond" />
-        </label>
-        <em class="dajb-hint">Font + regex = AND (both must match). Use the Scan Fonts inspector to discover values.</em>
+        <em class="dajb-hint">Font size + regex = AND (both must match).</em>
       </fieldset>`;
 
     const regexFields = `
@@ -546,12 +540,12 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     // Refresh preview on targeting-related changes — debounced for text fields
     // so typing doesn't steal focus by re-rendering on every character.
     if (["pattern", "flags", "pageRanges", "captureGroup", "fontSize", "minFontSize", "maxFontSize",
-         "fontNameContains", "groupName", "breakOnSentence",
+         "groupName", "breakOnSentence",
          "outputFormat.headingLevel", "outputFormat.additionalFormatting", "outputFormat.paragraphDetection",
          "firstRowHeader", "columnGapMinPt", "columnGapMultiplier", "maxColumns", "autoDetect",
          "formatOptions.bold", "formatOptions.underline", "formatOptions.indent",
          "formatOptions.lineReturnBefore", "formatOptions.lineReturnAfter"].includes(field)) {
-      const isTextInput = ["pattern", "flags", "pageRanges", "fontNameContains", "groupName", "fontSize", "minFontSize", "maxFontSize", "columnGapMinPt", "columnGapMultiplier", "maxColumns"].includes(field);
+      const isTextInput = ["pattern", "flags", "pageRanges", "groupName", "fontSize", "minFontSize", "maxFontSize", "columnGapMinPt", "columnGapMultiplier", "maxColumns"].includes(field);
       const isFontSizeRange = field === "minFontSize" || field === "maxFontSize";
       this._schedulePreviewRefresh(!isTextInput, isFontSizeRange ? 4000 : undefined);
     }
@@ -579,11 +573,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         }
       }
 
-      if (this._inspectingFonts) {
-        this._renderFontInspector();
-      } else {
-        this._renderPreview();
-      }
+      this._renderPreview();
 
       // Restore focus to the editor field that was active before the refresh
       if (savedField && editorPanel) {
@@ -740,7 +730,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       const sectionChildRules = rule.children?.filter(c =>
         (c.ruleType === 'create-section' || c.ruleType === 'create-collated-section' || c.ruleType === 'remove-section') &&
         !c.disabled &&
-        (c.pattern || c.fontSize != null || c.fontNameContains)
+        (c.pattern || c.fontSize != null)
       ) ?? [];
       const childRule = sectionChildRules[0]
         ?? rule.children?.find(c => c.ruleType === 'create-table' && !c.disabled)
@@ -1004,8 +994,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           return el; // early return — we've fully rendered the body
         }
 
-        const hasCriteria = !!(tableChild.pattern || tableChild.fontSize != null ||
-                               tableChild.fontNameContains);
+        const hasCriteria = !!(tableChild.pattern || tableChild.fontSize != null);
         let tableItems = strippedItems;
         if (hasCriteria && strippedItems.length) {
           const sections = RuleManager.splitOnCombinedTargeting(strippedItems, tableChild);
@@ -1081,7 +1070,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
   /** Get text for a rule, applying font criteria as a pre-filter when paired with a regex. */
   async _getTextForRule(rule, ranges) {
-    const hasFontFilter = rule.fontSize != null || rule.fontNameContains;
+    const hasFontFilter = rule.fontSize != null;
     if (hasFontFilter) {
       const items = await this.pdfParser.getPagesItems(ranges);
       const filtered = PDFParser.filterByCriteria(items, rule);
@@ -1204,7 +1193,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     if (!ruleId) return;
     this.ruleManager.moveRuleUp(ruleId);
     this._renderRulesTree();
-    if (this._inspectingFonts) this._renderFontInspector(); else this._renderPreview();
+    this._renderPreview();
   }
 
   static _onMoveRuleDown(event, target) {
@@ -1213,7 +1202,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     if (!ruleId) return;
     this.ruleManager.moveRuleDown(ruleId);
     this._renderRulesTree();
-    if (this._inspectingFonts) this._renderFontInspector(); else this._renderPreview();
+    this._renderPreview();
   }
 
   static _onCollapseRule(event, target) {
@@ -1226,98 +1215,6 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
   }
 
   // ── Font Inspector ────────────────────────────────────────────────────────
-
-  static _onInspectFonts(event, target) {
-    this._inspectingFonts = !this._inspectingFonts;
-    const btn = this.element.querySelector("[data-action='inspect-fonts']");
-    if (btn) btn.classList.toggle("active", this._inspectingFonts);
-    if (this._inspectingFonts) {
-      this._renderFontInspector();
-    } else {
-      this._renderPreview();
-    }
-  }
-
-  async _renderFontInspector() {
-    const container = this.element?.querySelector("#dajb-preview-content");
-    if (!container) return;
-
-    if (!this.pdfParser.totalPages) {
-      container.innerHTML = '<div class="dajb-preview-empty">Load a PDF first.</div>';
-      return;
-    }
-
-    const topRule = this.selectedRuleId
-      ? this.ruleManager.getTopLevelAncestor(this.selectedRuleId)
-      : this.ruleManager.getTopLevelRules()[0];
-
-    if (!topRule) {
-      container.innerHTML = '<div class="dajb-preview-empty">Select or create a rule with page ranges set.</div>';
-      return;
-    }
-
-    const ranges = this.ruleManager.parsePageRanges(topRule.pageRanges);
-    if (!ranges.length) {
-      container.innerHTML = '<div class="dajb-preview-empty">Set page ranges on the top-level rule first.</div>';
-      return;
-    }
-
-    container.innerHTML = '<div class="dajb-preview-empty">Scanning fonts…</div>';
-
-    try {
-      const items = await this.pdfParser.getPagesItems(ranges, {});
-      const summary = PDFParser.getFontSummary(items);
-
-      const wrap = document.createElement('div');
-      wrap.className = 'dajb-font-inspector';
-
-      const hdr = document.createElement('div');
-      hdr.className = 'dajb-font-inspector-header';
-      hdr.textContent = `${summary.length} font/size combinations — ${items.length} total items — pages ${topRule.pageRanges}`;
-      wrap.appendChild(hdr);
-
-      const table = document.createElement('table');
-      table.className = 'dajb-font-table';
-      table.innerHTML = `<thead><tr>
-        <th></th><th>Font Name</th><th>Size (pt)</th><th>B/I</th><th>Count</th><th>Sample Text</th>
-      </tr></thead>`;
-
-      const canApply = !!this.selectedRuleId;
-      const tbody = document.createElement('tbody');
-      for (const row of summary) {
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td class="dajb-font-apply-cell">
-            ${canApply ? `<button type="button" class="dajb-icon-btn dajb-font-apply-btn" title="Apply to selected rule">+</button>` : ''}
-          </td>
-          <td class="dajb-monospace dajb-font-name">${this._esc(row.fontName || '(unknown)')}</td>
-          <td class="dajb-font-size">${row.fontSize}</td>
-          <td class="dajb-font-bi">${row.isBold ? '<strong>B</strong>' : ''}${row.isItalic ? '<em>I</em>' : ''}</td>
-          <td class="dajb-font-count">${row.count}</td>
-          <td class="dajb-font-sample">${this._esc(row.sample)}</td>
-        `;
-        if (canApply) {
-          tr.querySelector('.dajb-font-apply-btn').addEventListener('click', () => {
-            this.ruleManager.updateRule(this.selectedRuleId, {
-              fontNameContains: row.fontName,
-              fontSize: row.fontSize,
-            });
-            this._renderEditor();
-            this._renderFontInspector();
-          });
-        }
-        tbody.appendChild(tr);
-      }
-      table.appendChild(tbody);
-      wrap.appendChild(table);
-
-      container.innerHTML = '';
-      container.appendChild(wrap);
-    } catch (err) {
-      container.innerHTML = `<div class="dajb-preview-empty">Error: ${err.message}</div>`;
-      console.error('DAJB font inspector error', err);
-    }
-  }
 
   // ── Preview text selection → create rule ─────────────────────────────────
 
@@ -1461,10 +1358,9 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     }
   }
 
-  _addToCurrentRule({ fontName, fontSize }) {
+  _addToCurrentRule({ fontSize }) {
     if (!this.selectedRuleId) return;
     const updates = {};
-    if (fontName)       updates.fontNameContains = fontName;
     if (fontSize != null) updates.fontSize = fontSize;
     if (!Object.keys(updates).length) return;
     this.ruleManager.updateRule(this.selectedRuleId, updates);
@@ -1473,9 +1369,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     ui.notifications?.info("DAJB | Font properties applied to current rule.");
   }
 
-  _createRuleFromSelection({ fontName, fontSize }) {
+  _createRuleFromSelection({ fontSize }) {
     const overrides = {};
-    if (fontName)         overrides.fontNameContains = fontName;
     if (fontSize != null) overrides.fontSize = fontSize;
 
     let rule;
@@ -1526,4 +1421,5 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
   _esc(str) {
     return (str ?? "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
+
 }
