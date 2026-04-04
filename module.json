@@ -1,10 +1,10 @@
 {
   "id": "dynamic-adventure-journal-builder",
   "title": "Dynamic Adventure Journal Builder",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "compatibility": {
     "minimum": "13",
-    "verified": "13"
+    "verified": "14.359"
   },
   "authors": [
     {
