@@ -40,7 +40,7 @@ export class RuleManager {
       maxColumns: 0,           // 0 = auto; N = cap column count at N (keeps N-1 largest gaps)
       autoDetect: false,       // create-table: detect table regions geometrically
       outputFormat: {
-        headingLevel: 2,
+        headingLevel: 1,
         additionalFormatting: "", // "" | "ul" | "ol" | "blockquote" | "pre" | "secret"
         paragraphDetection: "",   // "" | "spacing" | "indent" | "both"
       },
@@ -71,7 +71,11 @@ export class RuleManager {
   createRule(parentId = null) {
     let hasPageRule = false;
     this._walk(this.rules, (r) => { if (r.ruleType === 'create-page') hasPageRule = true; });
-    const rule = this._makeRule({ ruleType: hasPageRule ? 'create-section' : 'create-page' });
+    const isTopLevel = parentId === null;
+    const defaultType = isTopLevel
+      ? (hasPageRule ? 'create-category' : 'create-page')
+      : (hasPageRule ? 'create-section'  : 'create-page');
+    const rule = this._makeRule({ ruleType: defaultType });
     if (parentId === null) {
       this.rules.push(rule);
     } else {
@@ -328,6 +332,9 @@ export class RuleManager {
         if (Math.floor(item.fontSize) !== Math.floor(rule.fontSize)) return false;
       }
     }
+    if (rule.fontNameContains) {
+      if (!(item.fontName ?? '').toLowerCase().includes(rule.fontNameContains.toLowerCase())) return false;
+    }
     return true;
   }
 
@@ -400,7 +407,7 @@ export class RuleManager {
   static splitOnCombinedTargeting(items, rule) {
     if (!items?.length) return [];
 
-    const hasFontCriteria = rule.fontSize != null || rule.minFontSize != null || rule.maxFontSize != null;
+    const hasFontCriteria = rule.fontSize != null || rule.minFontSize != null || rule.maxFontSize != null || !!rule.fontNameContains;
     const hasPattern = !!rule.pattern;
 
     // No targeting at all: everything is body
@@ -454,6 +461,14 @@ export class RuleManager {
             }
           }
           if (firstFontStart === null) continue; // no font-qualifying items → skip
+          // Skip if the match only fired because non-font tail text satisfied the
+          // pattern (e.g. "1 O" where "O" is the first letter of a body-font word).
+          // Re-test the pattern against just the font-qualified span; if it no longer
+          // matches, the boundary is spurious.
+          const fontSpanText = text.slice(matchStart, lastFontEnd);
+          const testFlags = (rule.flags || '').replace(/g/g, '');
+          let testRe; try { testRe = new RegExp(rule.pattern, testFlags); } catch(e) {}
+          if (testRe && !testRe.test(fontSpanText)) continue;
           // Title is built from font-qualifying items only — the raw regex match
           // may be greedy and consume body text or non-font interstitial text.
           boundaries.push({
@@ -684,7 +699,7 @@ export class RuleManager {
   }
 
   static _applyStrip(items, rule) {
-    const hasFontCriteria = rule.fontSize != null || rule.minFontSize != null || rule.maxFontSize != null;
+    const hasFontCriteria = rule.fontSize != null || rule.minFontSize != null || rule.maxFontSize != null || !!rule.fontNameContains;
     const hasPattern = !!rule.pattern;
     if (!hasFontCriteria && !hasPattern) return items;
 
