@@ -303,7 +303,7 @@ export class JournalCreator {
       // Render and flush a pending collate group for one rule
       const renderCollate = async (rule, secs) => {
         if (!secs.length) return '';
-        const rl    = +(rule.outputFormat?.headingLevel ?? 2);
+        const rl    = +(rule.outputFormat?.headingLevel ?? 1);
         const af    = rule.outputFormat?.additionalFormatting
           ?? (rule.outputFormat?.asList ? (rule.outputFormat?.listType ?? 'ul') : '');
         const isList = af === 'ul' || af === 'ol';

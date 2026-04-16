@@ -1,0 +1,8 @@
+# v1.0.2
+
+
+## minor
+
+- Fixed some matching rules to improve accuracy of matches
+- Fixed bug that was causing "New Catagory" rule to render incorrectly.
+- Fixed bug that was causing default Header level to be "2" instead of "1"

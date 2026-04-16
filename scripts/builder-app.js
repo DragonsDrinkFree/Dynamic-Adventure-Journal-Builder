@@ -256,6 +256,10 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             ${rule.maxFontSize != null ? `<span class="dajb-font-size-max-label">max</span><input type="number" data-field="maxFontSize" value="${rule.maxFontSize}" min="0" step="0.5" class="dajb-font-size-input" />` : ''}
           </div>
         </label>
+        <label class="dajb-field">
+          <span>Font Name</span>
+          <input type="text" data-field="fontNameContains" value="${this._esc(rule.fontNameContains ?? "")}" placeholder="e.g. g_d0_f6" class="dajb-monospace" style="width:120px" />
+        </label>
         <em class="dajb-hint">Font size + regex = AND (both must match).</em>
       </fieldset>`;
 
@@ -756,7 +760,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         const flushCollate = () => {
           for (const [cr, secs] of pendingCollate) {
             if (!secs.length) continue;
-            const level = +(cr.outputFormat?.headingLevel ?? 2);
+            const level = +(cr.outputFormat?.headingLevel ?? 1);
             const groupEl = document.createElement('div');
             groupEl.className = 'dajb-preview-collate-group';
             if (level > 0) {
@@ -824,7 +828,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         // Each match's body is still passed through any grandchild rules.
         const childSections = RuleManager.splitOnCombinedTargeting(strippedItems, childRule);
         const matches = childSections.filter(s => s.match !== null);
-        const level = +(childRule.outputFormat?.headingLevel ?? 2);
+        const level = +(childRule.outputFormat?.headingLevel ?? 1);
         const hasGrandchildren = childRule.children?.some(c => c.ruleType !== 'strip');
         // preamble prose
         const preamble = childSections.find(s => s.match === null);
@@ -1358,10 +1362,11 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     }
   }
 
-  _addToCurrentRule({ fontSize }) {
+  _addToCurrentRule({ fontName, fontSize }) {
     if (!this.selectedRuleId) return;
     const updates = {};
     if (fontSize != null) updates.fontSize = fontSize;
+    if (fontName)         updates.fontNameContains = fontName;
     if (!Object.keys(updates).length) return;
     this.ruleManager.updateRule(this.selectedRuleId, updates);
     this._renderEditor();
@@ -1369,9 +1374,10 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     ui.notifications?.info("DAJB | Font properties applied to current rule.");
   }
 
-  _createRuleFromSelection({ fontSize }) {
+  _createRuleFromSelection({ fontName, fontSize }) {
     const overrides = {};
     if (fontSize != null) overrides.fontSize = fontSize;
+    if (fontName)         overrides.fontNameContains = fontName;
 
     let rule;
     if (this.selectedRuleId) {
