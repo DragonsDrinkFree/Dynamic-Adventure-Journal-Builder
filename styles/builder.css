@@ -176,7 +176,7 @@
 /* Disabled rules: dim the label/toggle but leave the checkbox at full opacity */
 .dajb-rule-item.dajb-disabled .dajb-rule-label { opacity: 0.45; text-decoration: line-through; font-style: italic; }
 .dajb-rule-item.dajb-disabled .dajb-rule-toggle { opacity: 0.45; }
-.dajb-rule-item.dajb-disabled .dajb-rule-order  { opacity: 0.45; }
+.dajb-rule-item.dajb-disabled .dajb-rule-grip   { opacity: 0.45; }
 
 .dajb-rule-enable-check {
   flex-shrink: 0;
@@ -204,8 +204,8 @@
 /* ── Editor panel ─────────────────────────────────────────────── */
 
 .dajb-editor-panel {
-  width: 460px;
-  min-width: 320px;
+  width: 340px;
+  min-width: 280px;
   flex-shrink: 0;
   background: #1d1d1d;
   overflow-y: auto;
@@ -250,20 +250,22 @@
   align-items: center;
   gap: 8px;
   font-size: 12px;
+  justify-content: flex-start;
 }
 
 .dajb-field > span {
   flex-shrink: 0;
-  width: 150px;
+  width: 100px;
   color: #999;
-  text-align: right;
+  text-align: left;
 }
 
 .dajb-field input[type="text"],
 .dajb-field input[type="number"],
 .dajb-field select,
 .dajb-field textarea {
-  flex: 1;
+  flex: 1 1 auto;
+  max-width: 190px;
   background: #111;
   border: 1px solid #444;
   border-radius: 3px;
@@ -518,25 +520,18 @@
   opacity: 0.85;
 }
 
-/* Up/down order buttons */
-.dajb-rule-order {
+/* Drag handle (reorder + reparent) */
+.dajb-rule-grip {
   margin-left: auto;
-  display: flex;
-  gap: 2px;
+  color: #666;
+  font-size: 11px;
+  cursor: grab;
   opacity: 0;
   transition: opacity 0.15s;
+  flex-shrink: 0;
 }
-.dajb-rule-item:hover .dajb-rule-order { opacity: 1; }
-.dajb-rule-order button {
-  background: none;
-  border: none;
-  color: #888;
-  cursor: pointer;
-  font-size: 9px;
-  padding: 0 3px;
-  line-height: 1;
-}
-.dajb-rule-order button:hover { color: #fff; }
+.dajb-rule-item:hover .dajb-rule-grip { opacity: 1; }
+.dajb-rule-item.dajb-dragging { opacity: 0.4; }
 
 /* Editor header tints per rule type */
 .dajb-editor-header.strip-header    { border-bottom-color: rgba(224, 120, 120, 0.4); }
@@ -1002,6 +997,7 @@ mark.dajb-match {
 .dajb-rtool-default   .dajb-rtool-swatch { background: rgba(100, 200, 100, 0.85); }
 .dajb-rtool-exclusion .dajb-rtool-swatch { background: rgba(224, 120, 120, 0.9); }
 .dajb-rtool-override  .dajb-rtool-swatch { background: rgba(100, 160, 255, 0.9); }
+.dajb-rtool-edit      .dajb-rtool-swatch { background: rgba(255, 210, 80, 0.95); }
 
 .dajb-region-nav {
   display: flex;
@@ -1019,11 +1015,21 @@ mark.dajb-match {
   padding: 2px 8px;
 }
 .dajb-region-nav button:hover { background: #333; }
-.dajb-region-pagelabel { min-width: 110px; text-align: center; }
+.dajb-region-pagelabel { min-width: 130px; text-align: center; }
+.dajb-region-pagelabel.dajb-has-exceptions { color: #e8a838; }
+
+/* Tab body: canvas on the left, region side panel on the right. */
+.dajb-region-tab { flex-direction: column; }
+.dajb-region-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
 
 .dajb-region-canvas-wrap {
   position: relative;
   flex: 1;
+  min-width: 0;
   min-height: 0;
   overflow: auto;
   background: #0d0d0d;
@@ -1052,14 +1058,60 @@ mark.dajb-match {
   font-style: italic;
 }
 
-.dajb-region-list {
+/* Collapse / expand handle between the canvas and the side panel */
+.dajb-region-collapse {
   flex-shrink: 0;
-  max-height: 160px;
-  overflow-y: auto;
-  border-top: 1px solid #3a3a3a;
+  width: 22px;
+  background: #1a3a5a;
+  border: none;
+  border-left: 1px solid #2e5c8a;
+  color: #e8b84b;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0;
+}
+.dajb-region-collapse:hover { background: #244e7a; color: #ffd66b; }
+.dajb-region-body.dajb-side-collapsed .dajb-region-side { display: none; }
+
+/* Right side panel: sub-tabs + lists */
+.dajb-region-side {
+  width: 250px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid #3a3a3a;
   background: #161616;
+}
+.dajb-region-subtabs {
+  display: flex;
+  flex-shrink: 0;
+  border-bottom: 1px solid #3a3a3a;
+}
+.dajb-region-subtab {
+  flex: 1;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #999;
+  font-size: 11px;
+  font-weight: bold;
+  padding: 5px 4px;
+  cursor: pointer;
+}
+.dajb-region-subtab:hover { color: #ccc; }
+.dajb-region-subtab.active { color: #fff; border-bottom-color: #7ec8e3; }
+
+.dajb-region-list,
+.dajb-region-exceptions {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   padding: 4px;
 }
+.dajb-region-list[hidden],
+.dajb-region-exceptions[hidden] { display: none; }
+
 .dajb-region-empty {
   color: #777;
   font-size: 11px;
@@ -1069,24 +1121,34 @@ mark.dajb-match {
 }
 .dajb-region-row {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 5px;
+  align-items: flex-start;
+  gap: 5px;
+  padding: 3px 4px;
   border-bottom: 1px solid #262626;
   font-size: 11px;
   color: #ccc;
 }
+.dajb-region-row.dajb-region-draggable { cursor: grab; }
+.dajb-region-row.dajb-region-selected {
+  background: rgba(255, 210, 80, 0.12);
+  outline: 1px solid rgba(255, 210, 80, 0.5);
+}
+.dajb-region-row.dajb-dragging { opacity: 0.4; }
 .dajb-region-swatch {
-  width: 12px;
-  height: 12px;
+  width: 11px;
+  height: 11px;
   border-radius: 2px;
   flex-shrink: 0;
+  margin-top: 2px;
 }
-.dajb-region-rowtext { flex: 1; line-height: 1.3; }
-.dajb-region-scope {
-  color: #888;
-  font-size: 10px;
+.dajb-region-rowtext {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.3;
+  display: flex;
+  flex-direction: column;
 }
+.dajb-region-scope { color: #888; font-size: 10px; }
 .dajb-region-dims {
   color: #777;
   font-size: 10px;
@@ -1098,9 +1160,35 @@ mark.dajb-match {
   border-radius: 3px;
   color: #c87878;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 10px;
   line-height: 1;
-  padding: 2px 6px;
+  padding: 1px 4px;
   flex-shrink: 0;
 }
 .dajb-region-del:hover { background: #3a2020; }
+
+/* Exceptions overview */
+.dajb-region-overview-head {
+  font-size: 11px;
+  font-weight: bold;
+  color: #9ade9a;
+  padding: 5px 6px;
+  border-bottom: 1px solid #262626;
+}
+.dajb-region-overview-row {
+  padding: 5px 6px;
+  border-bottom: 1px solid #262626;
+  font-size: 11px;
+  color: #ccc;
+  cursor: pointer;
+}
+.dajb-region-overview-row:hover { background: #222; }
+.dajb-region-overview-row.dajb-region-selected {
+  background: rgba(126, 200, 227, 0.12);
+  outline: 1px solid rgba(126, 200, 227, 0.4);
+}
+
+/* Drag-reorder insertion indicators (shared: rules tree + region list) */
+.dajb-drop-before { box-shadow: inset 0 2px 0 0 #7ec8e3; }
+.dajb-drop-after  { box-shadow: inset 0 -2px 0 0 #7ec8e3; }
+.dajb-drop-child  { outline: 2px solid #7ec8e3; outline-offset: -2px; background: rgba(126, 200, 227, 0.12); }

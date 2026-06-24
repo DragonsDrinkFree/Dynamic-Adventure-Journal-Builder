@@ -30,8 +30,6 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       "delete-rule":   function(ev, t) { BuilderApp._onDeleteRule.call(this, ev, t); },
       "select-rule":   function(ev, t) { BuilderApp._onSelectRule.call(this, ev, t); },
       "collapse-rule":    function(ev, t) { BuilderApp._onCollapseRule.call(this, ev, t); },
-      "move-rule-up":     function(ev, t) { BuilderApp._onMoveRuleUp.call(this, ev, t); },
-      "move-rule-down":   function(ev, t) { BuilderApp._onMoveRuleDown.call(this, ev, t); },
     },
   };
 
@@ -134,6 +132,138 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     for (const rule of rules) {
       container.appendChild(this._buildRuleNode(rule, 0, false));
     }
+    this._setupRuleDragDrop(container);
+  }
+
+  // ── Rules Tree drag & drop ──────────────────────────────────────────────────
+
+  /** Allowed top-level rule types; everything else is child-only. */
+  static TOP_LEVEL_TYPES = ["create-category", "create-page"];
+
+  /**
+   * Validate a prospective drop.  `destParentId === null` means top level.
+   * Returns true when the dragged rule's type is allowed at the destination level
+   * and the move would not create a cycle.
+   */
+  _canDropRule(draggedId, destParentId) {
+    const dragged = this.ruleManager.getRuleById(draggedId);
+    if (!dragged) return false;
+    if (destParentId && this.ruleManager.isDescendant(draggedId, destParentId)) return false;
+    const isTopLevel = destParentId === null;
+    if (isTopLevel) return BuilderApp.TOP_LEVEL_TYPES.includes(dragged.ruleType);
+    return dragged.ruleType !== "create-category"; // any child type
+  }
+
+  _clearDropIndicators() {
+    this.element?.querySelectorAll(".dajb-drop-before, .dajb-drop-after, .dajb-drop-child")
+      .forEach((el) => el.classList.remove("dajb-drop-before", "dajb-drop-after", "dajb-drop-child"));
+  }
+
+  /**
+   * Resolve the drop target under the cursor into a concrete destination.
+   * Returns { parentId, index, zone, item } or null when the drop is invalid.
+   */
+  _resolveDropTarget(ev) {
+    const item = ev.target.closest(".dajb-rule-item");
+    const tree = this.element.querySelector("#dajb-rules-tree");
+
+    // Dropping onto empty tree space → append at top level.
+    if (!item) {
+      if (!this._canDropRule(this._dragRuleId, null)) return null;
+      return { parentId: null, index: null, zone: "after", item: null };
+    }
+
+    const targetId = item.dataset.ruleId;
+    if (targetId === this._dragRuleId) return null;
+
+    const rect = item.getBoundingClientRect();
+    const rel = (ev.clientY - rect.top) / rect.height;
+    const path = this.ruleManager.getPathToRule(targetId);
+    const targetParentId = path.length > 1 ? path[path.length - 2].id : null;
+
+    let zone;
+    if (rel < 0.25) zone = "before";
+    else if (rel > 0.75) zone = "after";
+    else zone = "child";
+
+    if (zone === "child") {
+      if (!this._canDropRule(this._dragRuleId, targetId)) return null;
+      return { parentId: targetId, index: null, zone, item };
+    }
+
+    // Sibling of the target — same parent/level.
+    if (!this._canDropRule(this._dragRuleId, targetParentId)) return null;
+    const siblings = targetParentId === null
+      ? this.ruleManager.getTopLevelRules()
+      : this.ruleManager.getRuleById(targetParentId).children;
+    let index = siblings.findIndex((r) => r.id === targetId);
+    if (zone === "after") index += 1;
+    return { parentId: targetParentId, index, zone, item };
+  }
+
+  _setupRuleDragDrop(container) {
+    container.addEventListener("dragstart", (ev) => {
+      const item = ev.target.closest(".dajb-rule-item");
+      if (!item) return;
+      this._dragRuleId = item.dataset.ruleId;
+      ev.dataTransfer.effectAllowed = "move";
+      ev.dataTransfer.setData("text/plain", this._dragRuleId);
+      item.classList.add("dajb-dragging");
+    });
+
+    container.addEventListener("dragover", (ev) => {
+      if (!this._dragRuleId) return;
+      ev.preventDefault();
+      this._clearDropIndicators();
+      const target = this._resolveDropTarget(ev);
+      if (!target) { ev.dataTransfer.dropEffect = "none"; return; }
+      ev.dataTransfer.dropEffect = "move";
+      if (target.item) {
+        const cls = target.zone === "before" ? "dajb-drop-before"
+                  : target.zone === "after"  ? "dajb-drop-after"
+                  : "dajb-drop-child";
+        target.item.classList.add(cls);
+      }
+    });
+
+    container.addEventListener("drop", (ev) => {
+      if (!this._dragRuleId) return;
+      ev.preventDefault();
+      const target = this._resolveDropTarget(ev);
+      this._clearDropIndicators();
+      if (target) {
+        try {
+          // moveRule removes the rule before inserting, so a downward move within
+          // the same container needs its index decremented by one.
+          let index = target.index;
+          if (index != null) {
+            const path = this.ruleManager.getPathToRule(this._dragRuleId);
+            const srcParentId = path.length > 1 ? path[path.length - 2].id : null;
+            if (srcParentId === target.parentId) {
+              const siblings = target.parentId === null
+                ? this.ruleManager.getTopLevelRules()
+                : this.ruleManager.getRuleById(target.parentId).children;
+              const srcIndex = siblings.findIndex((r) => r.id === this._dragRuleId);
+              if (srcIndex !== -1 && srcIndex < index) index -= 1;
+            }
+          }
+          this.ruleManager.moveRule(this._dragRuleId, target.parentId, index);
+          if (target.zone === "child" && target.parentId) this._collapsedIds.delete(target.parentId);
+        } catch (e) {
+          console.warn("DAJB | Move failed:", e.message);
+        }
+        this._renderRulesTree();
+        this._schedulePreviewRefresh(true);
+      }
+      this._dragRuleId = null;
+    });
+
+    const cleanup = () => { this._clearDropIndicators(); this._dragRuleId = null;
+      container.querySelectorAll(".dajb-dragging").forEach(el => el.classList.remove("dajb-dragging")); };
+    container.addEventListener("dragend", cleanup);
+    container.addEventListener("dragleave", (ev) => {
+      if (!container.contains(ev.relatedTarget)) this._clearDropIndicators();
+    });
   }
 
   _buildRuleNode(rule, depth, parentDisabled = false) {
@@ -196,18 +326,14 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     const effectivelyDisabled = rule.disabled || parentDisabled;
     if (effectivelyDisabled) item.classList.add("dajb-disabled");
 
-    // Order buttons
-    const orderBtns = document.createElement("span");
-    orderBtns.className = "dajb-rule-order";
-    const btnUp = document.createElement("button");
-    btnUp.type = "button"; btnUp.textContent = "▲"; btnUp.title = "Move up";
-    btnUp.dataset.action = "move-rule-up"; btnUp.dataset.ruleId = rule.id;
-    const btnDown = document.createElement("button");
-    btnDown.type = "button"; btnDown.textContent = "▼"; btnDown.title = "Move down";
-    btnDown.dataset.action = "move-rule-down"; btnDown.dataset.ruleId = rule.id;
-    orderBtns.appendChild(btnUp);
-    orderBtns.appendChild(btnDown);
-    item.appendChild(orderBtns);
+    // Drag handle / draggable item (reorder + reparent via drag-and-drop)
+    item.draggable = true;
+    item.dataset.depth = String(depth);
+    const grip = document.createElement("span");
+    grip.className = "dajb-rule-grip";
+    grip.textContent = "⠿";
+    grip.title = "Drag to reorder or reparent";
+    item.appendChild(grip);
 
     const wrapper = document.createElement("div");
     wrapper.appendChild(item);
@@ -1218,24 +1344,6 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     this._renderEditor();
     this._renderPreview();
     if (this.activeTab === "regions") this.regionSelector.activate();
-  }
-
-  static _onMoveRuleUp(event, target) {
-    event.stopPropagation();
-    const ruleId = target.dataset.ruleId;
-    if (!ruleId) return;
-    this.ruleManager.moveRuleUp(ruleId);
-    this._renderRulesTree();
-    this._renderPreview();
-  }
-
-  static _onMoveRuleDown(event, target) {
-    event.stopPropagation();
-    const ruleId = target.dataset.ruleId;
-    if (!ruleId) return;
-    this.ruleManager.moveRuleDown(ruleId);
-    this._renderRulesTree();
-    this._renderPreview();
   }
 
   static _onCollapseRule(event, target) {

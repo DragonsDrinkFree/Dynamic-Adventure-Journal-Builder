@@ -80,6 +80,9 @@
             <button type="button" class="dajb-rtool dajb-rtool-override" data-region-action="tool-override" title="Override — ignore the default regions on THIS page and use the regions drawn here instead.">
               <span class="dajb-rtool-swatch"></span> Override
             </button>
+            <button type="button" class="dajb-rtool dajb-rtool-edit" data-region-action="tool-edit" title="Edit — click a region to select it, drag its corner handles to resize, or drag its body to move.">
+              <span class="dajb-rtool-swatch"></span> Edit
+            </button>
           </div>
           <div class="dajb-region-nav">
             <button type="button" data-region-action="prev-page" title="Previous page">◀</button>
@@ -87,13 +90,23 @@
             <button type="button" data-region-action="next-page" title="Next page">▶</button>
           </div>
         </div>
-        <div class="dajb-region-canvas-wrap">
-          <div class="dajb-region-stage">
-            <canvas id="dajb-pdf-canvas" class="dajb-pdf-canvas"></canvas>
-            <canvas id="dajb-region-canvas" class="dajb-region-canvas"></canvas>
+        <div class="dajb-region-body">
+          <div class="dajb-region-canvas-wrap">
+            <div class="dajb-region-stage">
+              <canvas id="dajb-pdf-canvas" class="dajb-pdf-canvas"></canvas>
+              <canvas id="dajb-region-canvas" class="dajb-region-canvas"></canvas>
+            </div>
+          </div>
+          <button type="button" class="dajb-region-collapse" data-region-action="toggle-side" title="Hide region list">⟩</button>
+          <div class="dajb-region-side">
+            <div class="dajb-region-subtabs">
+              <button type="button" class="dajb-region-subtab active" data-region-tab="thispage">This Page</button>
+              <button type="button" class="dajb-region-subtab" data-region-tab="exceptions">Exceptions</button>
+            </div>
+            <div class="dajb-region-list" id="dajb-region-list"></div>
+            <div class="dajb-region-exceptions" id="dajb-region-exceptions" hidden></div>
           </div>
         </div>
-        <div class="dajb-region-list" id="dajb-region-list"></div>
       </div>
     </div>
 

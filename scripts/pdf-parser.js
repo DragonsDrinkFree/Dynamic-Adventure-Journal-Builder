@@ -448,18 +448,32 @@ export class PDFParser {
   }
 
   /**
-   * Render a PDF page onto a canvas at the given scale, sizing the canvas for the
-   * device pixel ratio.  Returns the pdf.js viewport (needed for canvas↔PDF
-   * coordinate conversion by the region selector).
+   * Render a PDF page onto a canvas, sizing the canvas for the device pixel ratio.
+   * Returns the pdf.js viewport (needed for canvas↔PDF coordinate conversion by
+   * the region selector).
+   *
+   * Pass `fitWidth` to scale the page so it fits that CSS width (clamped between
+   * `minScale` and `maxScale`); otherwise `scale` is used directly.
    * @param {number} pageNum
    * @param {HTMLCanvasElement} canvas
-   * @param {number} scale
+   * @param {{scale?:number, fitWidth?:number, minScale?:number, maxScale?:number}} [opts]
    * @returns {Promise<Object>} the pdf.js PageViewport
    */
-  async renderPageToCanvas(pageNum, canvas, scale = 1.3) {
+  async renderPageToCanvas(pageNum, canvas, opts = {}) {
     if (!this._doc) throw new Error("No PDF loaded");
     const page     = await this._doc.getPage(pageNum);
     const dpr      = window.devicePixelRatio || 1;
+
+    let scale = opts.scale ?? 1.3;
+    if (opts.fitWidth) {
+      const baseWidth = page.getViewport({ scale: 1 }).width;
+      if (baseWidth > 0) {
+        const maxScale = opts.maxScale ?? 2.5;
+        const minScale = opts.minScale ?? 0.25;
+        scale = Math.max(minScale, Math.min(maxScale, opts.fitWidth / baseWidth));
+      }
+    }
+
     const viewport = page.getViewport({ scale });
 
     canvas.width        = Math.floor(viewport.width  * dpr);

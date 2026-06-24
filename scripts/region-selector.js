@@ -5,29 +5,42 @@ import { RuleManager } from "./rule-manager.js";
  *
  * Renders the loaded PDF (page by page, across the active top-level rule's page
  * range) onto a canvas with a transparent overlay for drawing bounding boxes.
- * Three tools produce three kinds of region, all stored on the top-level page
- * rule's `regions` object in PDF user units:
+ * Tools produce regions stored on the top-level page rule's `regions` object in
+ * PDF user units:
  *
  *   • Default   — green; applied at the same coordinates on every page in range.
- *                 Multiple may be drawn per page (e.g. two columns); items are
- *                 stitched in draw order.
  *   • Exclusion — red; current-page-only carve-outs subtracted from the defaults.
- *   • Override  — blue; current-page-only regions that replace the defaults for
- *                 that single page.
+ *   • Override  — blue; current-page-only regions that replace the defaults.
+ *   • Edit      — select a region, drag corner handles to resize, drag body to move.
  *
- * Coordinate math mirrors the reference modules' PDF scanner: PDF rects are kept
- * scale-independent and converted to/from canvas pixels via the pdf.js viewport.
+ * The right side panel lists regions for the current page and gives an overview
+ * of every page that has exceptions.  Default and Override rows can be dragged to
+ * reorder (which sets the stitch `order`).
  */
 export class RegionSelector {
   constructor(app) {
     this.app = app;
-    this.tool = null;            // "default" | "exclusion" | "override" | null
+    this.tool = null;            // "default" | "exclusion" | "override" | "edit" | null
     this.scale = 1.3;
     this.currentPage = null;     // actual PDF page number
     this.viewport = null;        // pdf.js PageViewport for the rendered page
     this.dragStart = null;       // { x, y } in canvas buffer px
     this.currentRect = null;     // rubber-band rect in canvas buffer px
     this._ruleId = null;         // top-level rule id this tab is bound to
+
+    // Side panel
+    this.sidePanelTab = "thispage"; // "thispage" | "exceptions"
+    this.sideCollapsed = false;
+    this._resizeObs = null;
+
+    // Edit-tool state
+    this.selectedRegion = null;  // { kind: "default"|"override"|"exclusion", ref }
+    this.editMode = null;        // "move" | "resize" | null
+    this.resizeCorner = null;    // "nw" | "ne" | "sw" | "se"
+    this.editStartRect = null;   // selected region's rect (canvas px) at drag start
+
+    // List drag-reorder state
+    this._listDrag = null;       // { kind, index }
   }
 
   get pdfParser()   { return this.app.pdfParser; }
@@ -57,9 +70,25 @@ export class RegionSelector {
   /** Called from BuilderApp._onRender — DOM was rebuilt, so re-attach listeners. */
   onRender() {
     this._attachListeners();
-    // If the regions tab is the one currently visible, (re)render it.
+    this._setupResizeObserver();
     const tab = this.app.element?.querySelector("#dajb-tab-regions");
     if (tab && !tab.hidden) this.activate();
+  }
+
+  /** Re-fit the PDF when the canvas area resizes (window resize, panel collapse). */
+  _setupResizeObserver() {
+    this._resizeObs?.disconnect();
+    const wrap = this.app.element?.querySelector(".dajb-region-canvas-wrap");
+    if (!wrap || typeof ResizeObserver === "undefined") return;
+    let timer = null;
+    this._resizeObs = new ResizeObserver(() => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const tab = this.app.element?.querySelector("#dajb-tab-regions");
+        if (tab && !tab.hidden && this.viewport) this._renderCurrentPage();
+      }, 150);
+    });
+    this._resizeObs.observe(wrap);
   }
 
   /** Called when the user switches to the Select Regions tab. */
@@ -68,8 +97,11 @@ export class RegionSelector {
     const rule = this.rule;
     const pages = this.pages;
 
-    // Reset page when the bound rule changed or the current page left the range.
-    if (rule?.id !== this._ruleId) { this._ruleId = rule?.id ?? null; this.currentPage = null; }
+    if (rule?.id !== this._ruleId) {
+      this._ruleId = rule?.id ?? null;
+      this.currentPage = null;
+      this.selectedRegion = null;
+    }
     if (!pages.includes(this.currentPage)) this.currentPage = pages[0] ?? null;
 
     await this._renderCurrentPage();
@@ -81,8 +113,10 @@ export class RegionSelector {
     const tab = this.app.element?.querySelector("#dajb-tab-regions");
     if (!tab) return;
 
-    // Toolbar / nav / list buttons (delegated)
+    // Toolbar / nav / list buttons + side sub-tabs (delegated)
     tab.addEventListener("click", (ev) => {
+      const subtab = ev.target.closest("[data-region-tab]");
+      if (subtab) { ev.preventDefault(); this._switchSidePanel(subtab.dataset.regionTab); return; }
       const btn = ev.target.closest("[data-region-action]");
       if (!btn) return;
       ev.preventDefault();
@@ -94,8 +128,13 @@ export class RegionSelector {
       overlay.addEventListener("mousedown", (ev) => this._onMouseDown(ev, overlay));
       overlay.addEventListener("mousemove", (ev) => this._onMouseMove(ev, overlay));
       overlay.addEventListener("mouseup",   (ev) => this._onMouseUp(ev, overlay));
-      overlay.addEventListener("mouseleave", () => { this.dragStart = null; this.currentRect = null; this._redrawOverlay(); });
+      overlay.addEventListener("mouseleave", () => {
+        if (this.editMode) { this.editMode = null; this._persist(); }
+        this.dragStart = null; this.currentRect = null; this._redrawOverlay();
+      });
     }
+
+    this._attachListDragDrop(tab.querySelector("#dajb-region-list"));
   }
 
   _onAction(action, btn) {
@@ -103,15 +142,32 @@ export class RegionSelector {
       case "tool-default":   this._toggleTool("default");   break;
       case "tool-exclusion": this._toggleTool("exclusion"); break;
       case "tool-override":  this._toggleTool("override");  break;
+      case "tool-edit":      this._toggleTool("edit");      break;
       case "prev-page":      this._stepPage(-1); break;
       case "next-page":      this._stepPage(1);  break;
       case "delete-region":  this._deleteRegion(btn); break;
+      case "goto-page":      this._gotoPage(Number(btn.dataset.page)); break;
+      case "toggle-side":    this._toggleSide(); break;
     }
+  }
+
+  _toggleSide() {
+    this.sideCollapsed = !this.sideCollapsed;
+    const body = this.app.element?.querySelector(".dajb-region-body");
+    const btn  = this.app.element?.querySelector(".dajb-region-collapse");
+    if (body) body.classList.toggle("dajb-side-collapsed", this.sideCollapsed);
+    if (btn) {
+      btn.textContent = this.sideCollapsed ? "⟨" : "⟩";
+      btn.title = this.sideCollapsed ? "Show region list" : "Hide region list";
+    }
+    this._renderCurrentPage();
   }
 
   _toggleTool(tool) {
     this.tool = this.tool === tool ? null : tool;
+    if (this.tool !== "edit") this.selectedRegion = null;
     this._syncToolButtons();
+    this._redrawOverlay();
     const overlay = this.app.element?.querySelector("#dajb-region-canvas");
     if (overlay) overlay.style.cursor = this.tool ? "crosshair" : "default";
   }
@@ -119,12 +175,21 @@ export class RegionSelector {
   _syncToolButtons() {
     const tab = this.app.element?.querySelector("#dajb-tab-regions");
     if (!tab) return;
-    for (const t of ["default", "exclusion", "override"]) {
+    for (const t of ["default", "exclusion", "override", "edit"]) {
       tab.querySelector(`[data-region-action="tool-${t}"]`)
         ?.classList.toggle("dajb-active", this.tool === t);
     }
     const overlay = tab.querySelector("#dajb-region-canvas");
     if (overlay) overlay.style.cursor = this.tool ? "crosshair" : "default";
+  }
+
+  _switchSidePanel(tab) {
+    this.sidePanelTab = tab;
+    const root = this.app.element?.querySelector("#dajb-tab-regions");
+    if (!root) return;
+    root.querySelectorAll("[data-region-tab]").forEach((b) =>
+      b.classList.toggle("active", b.dataset.regionTab === tab));
+    this._renderSidePanel();
   }
 
   async _stepPage(delta) {
@@ -133,6 +198,15 @@ export class RegionSelector {
     const next = pages[idx + delta];
     if (next == null) return;
     this.currentPage = next;
+    this.selectedRegion = null;
+    await this._renderCurrentPage();
+  }
+
+  async _gotoPage(page) {
+    if (!page) return;
+    this.currentPage = page;
+    this.selectedRegion = null;
+    this._switchSidePanel("thispage");
     await this._renderCurrentPage();
   }
 
@@ -150,27 +224,16 @@ export class RegionSelector {
     const rule = this.rule;
     const pages = this.pages;
 
-    if (!this.pdfParser.totalPages) {
-      this._setCanvasMessage(wrap, "Load a PDF to draw regions.");
-      this._renderRegionList();
-      return;
-    }
-    if (!rule) {
-      this._setCanvasMessage(wrap, "Select a rule to draw regions.");
-      this._renderRegionList();
-      return;
-    }
-    if (!pages.length) {
-      this._setCanvasMessage(wrap, "Set page ranges on the top-level rule to draw regions.");
-      this._renderRegionList();
-      return;
-    }
+    if (!this.pdfParser.totalPages) { this._setCanvasMessage(wrap, "Load a PDF to draw regions."); this._renderSidePanel(); return; }
+    if (!rule)         { this._setCanvasMessage(wrap, "Select a rule to draw regions."); this._renderSidePanel(); return; }
+    if (!pages.length) { this._setCanvasMessage(wrap, "Set page ranges on the top-level rule to draw regions."); this._renderSidePanel(); return; }
 
     this._clearCanvasMessage(wrap);
     if (!pages.includes(this.currentPage)) this.currentPage = pages[0];
 
     try {
-      this.viewport = await this.pdfParser.renderPageToCanvas(this.currentPage, pdfCanvas, this.scale);
+      const availWidth = Math.max(120, (wrap?.clientWidth ?? 0) - 16); // minus 8px padding each side
+      this.viewport = await this.pdfParser.renderPageToCanvas(this.currentPage, pdfCanvas, { fitWidth: availWidth });
       overlay.width        = pdfCanvas.width;
       overlay.height       = pdfCanvas.height;
       overlay.style.width  = pdfCanvas.style.width;
@@ -183,21 +246,21 @@ export class RegionSelector {
 
     if (label) {
       const idx = pages.indexOf(this.currentPage);
-      label.textContent = `Page ${this.currentPage}  (${idx + 1}/${pages.length})`;
+      const cfg = this._pageCfgRead(rule, this.currentPage);
+      const marked = (cfg.overrides.length || cfg.exclusions.length) ? " ●" : "";
+      const pos = idx >= 0 ? ` (${idx + 1}/${pages.length})` : "";
+      label.textContent = `Page ${this.currentPage}${pos}${marked}`;
+      label.classList.toggle("dajb-has-exceptions", !!marked);
     }
 
     this._redrawOverlay();
-    this._renderRegionList();
+    this._renderSidePanel();
   }
 
   _setCanvasMessage(wrap, msg) {
     if (!wrap) return;
     let el = wrap.querySelector(".dajb-region-msg");
-    if (!el) {
-      el = document.createElement("div");
-      el.className = "dajb-region-msg";
-      wrap.appendChild(el);
-    }
+    if (!el) { el = document.createElement("div"); el.className = "dajb-region-msg"; wrap.appendChild(el); }
     el.textContent = msg;
     el.hidden = false;
   }
@@ -219,14 +282,12 @@ export class RegionSelector {
     const rule = this.rule;
     if (!rule) return;
     const regions = RuleManager.normalizeRegions(rule);
-    const cfg = regions.pages[this.currentPage] ?? regions.pages[String(this.currentPage)] ?? { exclusions: [], overrides: [] };
-    const pageOverridden = (cfg.overrides ?? []).length > 0;
+    const cfg = this._pageCfgRead(rule, this.currentPage);
+    const pageOverridden = cfg.overrides.length > 0;
 
     const drawRect = (r, stroke, fill, label, dashed = false) => {
       const c = this._pdfRectToCanvas(r);
-      ctx.fillStyle = fill;
-      ctx.strokeStyle = stroke;
-      ctx.lineWidth = 2;
+      ctx.fillStyle = fill; ctx.strokeStyle = stroke; ctx.lineWidth = 2;
       ctx.setLineDash(dashed ? [6 * dpr, 4 * dpr] : []);
       ctx.fillRect(c.x, c.y, c.w, c.h);
       ctx.strokeRect(c.x, c.y, c.w, c.h);
@@ -238,29 +299,30 @@ export class RegionSelector {
       }
     };
 
-    // Default regions — drawn on every page; faded/dashed when overridden here.
     for (const r of regions.defaults) {
-      drawRect(
-        r,
+      drawRect(r,
         pageOverridden ? "rgba(120,200,120,0.4)" : "rgba(100,200,100,0.85)",
         pageOverridden ? "rgba(120,200,120,0.05)" : "rgba(100,200,100,0.12)",
-        pageOverridden ? "default (inactive)" : "default",
-        pageOverridden
-      );
+        pageOverridden ? "default (inactive)" : "default", pageOverridden);
+    }
+    for (const r of cfg.overrides)  drawRect(r, "rgba(100,160,255,0.9)", "rgba(100,160,255,0.15)", "override");
+    for (const r of cfg.exclusions) drawRect(r, "rgba(224,120,120,0.9)", "rgba(224,120,120,0.18)", "exclude");
+
+    // Selected-region handles (edit tool)
+    if (this.tool === "edit" && this.selectedRegion) {
+      const c = this._pdfRectToCanvas(this.selectedRegion.ref);
+      ctx.strokeStyle = "rgba(255,210,80,0.95)";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4 * dpr, 3 * dpr]);
+      ctx.strokeRect(c.x, c.y, c.w, c.h);
+      ctx.setLineDash([]);
+      const hs = 8 * dpr;
+      ctx.fillStyle = "rgba(255,210,80,0.95)";
+      for (const [hx, hy] of this._handlePoints(c)) ctx.fillRect(hx - hs / 2, hy - hs / 2, hs, hs);
     }
 
-    // Override regions (current page)
-    for (const r of cfg.overrides ?? []) {
-      drawRect(r, "rgba(100,160,255,0.9)", "rgba(100,160,255,0.15)", "override");
-    }
-
-    // Exclusion regions (current page)
-    for (const r of cfg.exclusions ?? []) {
-      drawRect(r, "rgba(224,120,120,0.9)", "rgba(224,120,120,0.18)", "exclude");
-    }
-
-    // Active rubber-band
-    if (this.tool && this.currentRect) {
+    // Active rubber-band (draw tools)
+    if (this.tool && this.tool !== "edit" && this.currentRect) {
       const r = this.currentRect;
       const colour = this.tool === "exclusion" ? "rgba(224,120,120,0.9)"
                    : this.tool === "override"  ? "rgba(100,160,255,0.9)"
@@ -275,6 +337,10 @@ export class RegionSelector {
     }
   }
 
+  _handlePoints(c) {
+    return [[c.x, c.y], [c.x + c.w, c.y], [c.x, c.y + c.h], [c.x + c.w, c.y + c.h]];
+  }
+
   // ── Mouse handlers ────────────────────────────────────────────────────────────
 
   _bufferCoords(ev, overlay) {
@@ -285,29 +351,132 @@ export class RegionSelector {
   }
 
   _onMouseDown(ev, overlay) {
-    if (!this.tool || !this.viewport) return;
-    this.dragStart = this._bufferCoords(ev, overlay);
+    if (!this.viewport) return;
+    const pt = this._bufferCoords(ev, overlay);
+
+    if (this.tool === "edit") {
+      // Resize if grabbing a handle of the already-selected region.
+      if (this.selectedRegion) {
+        const corner = this._hitTestHandle(pt, this.selectedRegion.ref);
+        if (corner) {
+          this.editMode = "resize";
+          this.resizeCorner = corner;
+          this.editStartRect = this._pdfRectToCanvas(this.selectedRegion.ref);
+          this.dragStart = pt;
+          return;
+        }
+      }
+      // Otherwise select the region under the cursor and start a move.
+      const hit = this._hitTestRegion(pt);
+      this.selectedRegion = hit;
+      if (hit) {
+        this.editMode = "move";
+        this.editStartRect = this._pdfRectToCanvas(hit.ref);
+        this.dragStart = pt;
+      }
+      this._redrawOverlay();
+      return;
+    }
+
+    if (!this.tool) return;
+    this.dragStart = pt;
     this.currentRect = null;
   }
 
   _onMouseMove(ev, overlay) {
-    if (!this.tool || !this.dragStart) return;
-    const c = this._bufferCoords(ev, overlay);
-    this.currentRect = normalizeRect(this.dragStart.x, this.dragStart.y, c.x, c.y);
+    if (!this.tool) return;
+    const pt = this._bufferCoords(ev, overlay);
+
+    if (this.tool === "edit") {
+      if (!this.editMode || !this.dragStart || !this.selectedRegion) return;
+      const dx = pt.x - this.dragStart.x;
+      const dy = pt.y - this.dragStart.y;
+      const start = this.editStartRect;
+      let canvasRect;
+      if (this.editMode === "move") {
+        canvasRect = { x: start.x + dx, y: start.y + dy, w: start.w, h: start.h };
+      } else {
+        canvasRect = this._resizeRect(start, this.resizeCorner, dx, dy);
+      }
+      Object.assign(this.selectedRegion.ref, this._canvasRectToPdf(canvasRect));
+      this._redrawOverlay();
+      return;
+    }
+
+    if (!this.dragStart) return;
+    this.currentRect = normalizeRect(this.dragStart.x, this.dragStart.y, pt.x, pt.y);
     this._redrawOverlay();
   }
 
   _onMouseUp(ev, overlay) {
+    if (this.tool === "edit") {
+      if (this.editMode) {
+        this.editMode = null;
+        this.resizeCorner = null;
+        this.dragStart = null;
+        this.editStartRect = null;
+        this._persist();
+        this._renderSidePanel();
+      }
+      return;
+    }
+
     if (!this.tool || !this.dragStart) return;
     const rect = this.currentRect;
     this.dragStart = null;
     this.currentRect = null;
-    if (rect && rect.w > 8 && rect.h > 8) {
-      this._finalizeRegion(rect);
-    } else {
-      this._redrawOverlay();
-    }
+    if (rect && rect.w > 8 && rect.h > 8) this._finalizeRegion(rect);
+    else this._redrawOverlay();
   }
+
+  _resizeRect(start, corner, dx, dy) {
+    let left = start.x, top = start.y, right = start.x + start.w, bottom = start.y + start.h;
+    if (corner.includes("w")) left += dx;
+    if (corner.includes("e")) right += dx;
+    if (corner.includes("n")) top += dy;
+    if (corner.includes("s")) bottom += dy;
+    const MIN = 8;
+    let x = Math.min(left, right), y = Math.min(top, bottom);
+    let w = Math.max(MIN, Math.abs(right - left)), h = Math.max(MIN, Math.abs(top - bottom));
+    return { x, y, w, h };
+  }
+
+  // ── Hit testing ───────────────────────────────────────────────────────────────
+
+  /** Regions visible on the current page, top-most last (draw order). */
+  _regionsOnPage() {
+    const rule = this.rule;
+    if (!rule) return [];
+    const regions = RuleManager.normalizeRegions(rule);
+    const cfg = this._pageCfgRead(rule, this.currentPage);
+    const out = [];
+    for (const ref of regions.defaults) out.push({ kind: "default", ref });
+    for (const ref of cfg.overrides)    out.push({ kind: "override", ref });
+    for (const ref of cfg.exclusions)   out.push({ kind: "exclusion", ref });
+    return out;
+  }
+
+  _hitTestRegion(pt) {
+    const list = this._regionsOnPage();
+    // Iterate in reverse so the top-most drawn region wins.
+    for (let i = list.length - 1; i >= 0; i--) {
+      const c = this._pdfRectToCanvas(list[i].ref);
+      if (pt.x >= c.x && pt.x <= c.x + c.w && pt.y >= c.y && pt.y <= c.y + c.h) return list[i];
+    }
+    return null;
+  }
+
+  _hitTestHandle(pt, ref) {
+    const c = this._pdfRectToCanvas(ref);
+    const hs = 10 * (window.devicePixelRatio || 1);
+    const corners = { nw: [c.x, c.y], ne: [c.x + c.w, c.y], sw: [c.x, c.y + c.h], se: [c.x + c.w, c.y + c.h] };
+    for (const [name, [hx, hy]] of Object.entries(corners)) {
+      if (Math.abs(pt.x - hx) <= hs && Math.abs(pt.y - hy) <= hs) return name;
+    }
+    return null;
+  }
+
+  // ── Region creation / deletion ──────────────────────────────────────────────
 
   _finalizeRegion(canvasRect) {
     const rule = this.rule;
@@ -316,23 +485,16 @@ export class RegionSelector {
     const regions = RuleManager.normalizeRegions(rule);
 
     if (this.tool === "default") {
-      regions.defaults.push({
-        id: foundry.utils.randomID(),
-        order: regions.defaults.length,
-        ...pdfRect,
-      });
+      regions.defaults.push({ id: foundry.utils.randomID(), order: regions.defaults.length, ...pdfRect });
     } else {
       const cfg = this._pageCfg(rule, this.currentPage);
-      if (this.tool === "exclusion") {
-        cfg.exclusions.push({ ...pdfRect });
-      } else if (this.tool === "override") {
-        cfg.overrides.push({ id: foundry.utils.randomID(), order: cfg.overrides.length, ...pdfRect });
-      }
+      if (this.tool === "exclusion") cfg.exclusions.push({ ...pdfRect });
+      else if (this.tool === "override") cfg.overrides.push({ id: foundry.utils.randomID(), order: cfg.overrides.length, ...pdfRect });
     }
 
     this._persist();
     this._redrawOverlay();
-    this._renderRegionList();
+    this._renderSidePanel();
   }
 
   _pageCfg(rule, page) {
@@ -342,52 +504,10 @@ export class RegionSelector {
     return regions.pages[key];
   }
 
-  // ── Region list ───────────────────────────────────────────────────────────────
-
-  _renderRegionList() {
-    const list = this.app.element?.querySelector("#dajb-region-list");
-    if (!list) return;
-    list.innerHTML = "";
-
-    const rule = this.rule;
-    if (!rule) return;
-    const regions = RuleManager.normalizeRegions(rule);
-    const cfg = regions.pages[String(this.currentPage)] ?? { exclusions: [], overrides: [] };
-
-    const fmt = (r) => `${Math.round(r.w)}×${Math.round(r.h)} @ (${Math.round(r.x)}, ${Math.round(r.y)})`;
-
-    const addRow = (kind, label, colour, r, scope) => {
-      const row = document.createElement("div");
-      row.className = "dajb-region-row";
-      const swatch = document.createElement("span");
-      swatch.className = "dajb-region-swatch";
-      swatch.style.background = colour;
-      row.appendChild(swatch);
-      const text = document.createElement("span");
-      text.className = "dajb-region-rowtext";
-      text.innerHTML = `<strong>${label}</strong> <span class="dajb-region-scope">${scope}</span><br><span class="dajb-region-dims">${fmt(r)}</span>`;
-      row.appendChild(text);
-      const del = document.createElement("button");
-      del.type = "button";
-      del.className = "dajb-region-del";
-      del.textContent = "✕";
-      del.title = "Delete region";
-      del.dataset.regionAction = "delete-region";
-      del.dataset.kind = kind;
-      if (r.id) del.dataset.id = r.id;
-      else del.dataset.index = String((kind === "exclusion" ? cfg.exclusions : cfg.overrides).indexOf(r));
-      row.appendChild(del);
-      list.appendChild(row);
-    };
-
-    if (!regions.defaults.length && !cfg.overrides.length && !cfg.exclusions.length) {
-      list.innerHTML = '<div class="dajb-region-empty">No regions yet. Pick a tool and drag a box on the page.</div>';
-      return;
-    }
-
-    for (const r of regions.defaults)  addRow("default",   "Default",   "rgba(100,200,100,0.85)", r, "all pages");
-    for (const r of cfg.overrides ?? []) addRow("override",  "Override",  "rgba(100,160,255,0.9)",  r, `page ${this.currentPage}`);
-    for (const r of cfg.exclusions ?? []) addRow("exclusion", "Exclusion", "rgba(224,120,120,0.9)",  r, `page ${this.currentPage}`);
+  /** Read-only page config (never mutates the rule). */
+  _pageCfgRead(rule, page) {
+    const regions = rule.regions ?? {};
+    return regions.pages?.[String(page)] ?? { exclusions: [], overrides: [] };
   }
 
   _deleteRegion(btn) {
@@ -400,20 +520,198 @@ export class RegionSelector {
 
     if (kind === "default") {
       regions.defaults = regions.defaults.filter(r => r.id !== id);
+      this._renumber(regions.defaults);
     } else {
       const cfg = this._pageCfg(rule, this.currentPage);
       if (kind === "override") {
         cfg.overrides = id ? cfg.overrides.filter(r => r.id !== id) : cfg.overrides.filter((_, i) => i !== index);
+        this._renumber(cfg.overrides);
       } else if (kind === "exclusion") {
         cfg.exclusions = cfg.exclusions.filter((_, i) => i !== index);
       }
-      // Drop now-empty page config to keep the saved file tidy.
       if (!cfg.overrides.length && !cfg.exclusions.length) delete regions.pages[String(this.currentPage)];
     }
 
+    this.selectedRegion = null;
     this._persist();
     this._redrawOverlay();
-    this._renderRegionList();
+    this._renderSidePanel();
+  }
+
+  _renumber(arr) { arr.forEach((r, i) => { r.order = i; }); }
+
+  // ── Side panel ──────────────────────────────────────────────────────────────
+
+  _renderSidePanel() {
+    const list = this.app.element?.querySelector("#dajb-region-list");
+    const overview = this.app.element?.querySelector("#dajb-region-exceptions");
+    if (list)     list.hidden     = this.sidePanelTab !== "thispage";
+    if (overview) overview.hidden = this.sidePanelTab !== "exceptions";
+    if (this.sidePanelTab === "thispage") this._renderRegionList();
+    else this._renderExceptionsOverview();
+  }
+
+  _renderRegionList() {
+    const list = this.app.element?.querySelector("#dajb-region-list");
+    if (!list) return;
+    list.innerHTML = "";
+
+    const rule = this.rule;
+    if (!rule) return;
+    const regions = RuleManager.normalizeRegions(rule);
+    const cfg = this._pageCfgRead(rule, this.currentPage);
+
+    const fmt = (r) => `${Math.round(r.w)}×${Math.round(r.h)} @ (${Math.round(r.x)}, ${Math.round(r.y)})`;
+
+    const addRow = (kind, label, colour, r, scope, draggable, index) => {
+      const row = document.createElement("div");
+      row.className = "dajb-region-row";
+      row.dataset.kind = kind;
+      row.dataset.index = String(index);
+      if (this.selectedRegion?.ref === r) row.classList.add("dajb-region-selected");
+      if (draggable) { row.draggable = true; row.classList.add("dajb-region-draggable"); }
+
+      const swatch = document.createElement("span");
+      swatch.className = "dajb-region-swatch";
+      swatch.style.background = colour;
+      row.appendChild(swatch);
+
+      const text = document.createElement("span");
+      text.className = "dajb-region-rowtext";
+      text.innerHTML = `<strong>${label}</strong> <span class="dajb-region-scope">${scope}</span><span class="dajb-region-dims">${fmt(r)}</span>`;
+      row.appendChild(text);
+
+      const del = document.createElement("button");
+      del.type = "button"; del.className = "dajb-region-del"; del.textContent = "✕"; del.title = "Delete region";
+      del.dataset.regionAction = "delete-region";
+      del.dataset.kind = kind;
+      if (r.id) del.dataset.id = r.id;
+      del.dataset.index = String(index);
+      row.appendChild(del);
+      list.appendChild(row);
+    };
+
+    if (!regions.defaults.length && !cfg.overrides.length && !cfg.exclusions.length) {
+      list.innerHTML = '<div class="dajb-region-empty">No regions yet. Pick a tool and drag a box on the page.</div>';
+      return;
+    }
+
+    regions.defaults.forEach((r, i) => addRow("default",   "Default",   "rgba(100,200,100,0.85)", r, "all pages",              true,  i));
+    (cfg.overrides ?? []).forEach((r, i) => addRow("override",  "Override",  "rgba(100,160,255,0.9)",  r, `page ${this.currentPage}`, true,  i));
+    (cfg.exclusions ?? []).forEach((r, i) => addRow("exclusion", "Exclusion", "rgba(224,120,120,0.9)",  r, `page ${this.currentPage}`, false, i));
+  }
+
+  _renderExceptionsOverview() {
+    const root = this.app.element?.querySelector("#dajb-region-exceptions");
+    if (!root) return;
+    root.innerHTML = "";
+
+    const rule = this.rule;
+    if (!rule) return;
+    const regions = RuleManager.normalizeRegions(rule);
+
+    const head = document.createElement("div");
+    head.className = "dajb-region-overview-head";
+    head.textContent = `Defaults: ${regions.defaults.length} (all pages)`;
+    root.appendChild(head);
+
+    const pages = Object.keys(regions.pages)
+      .map(Number)
+      .filter(p => (regions.pages[p].overrides?.length || regions.pages[p].exclusions?.length))
+      .sort((a, b) => a - b);
+
+    if (!pages.length) {
+      const empty = document.createElement("div");
+      empty.className = "dajb-region-empty";
+      empty.textContent = "No page exceptions yet. Use the Override or Exclusion tool on a page.";
+      root.appendChild(empty);
+      return;
+    }
+
+    for (const p of pages) {
+      const cfg = regions.pages[p];
+      const row = document.createElement("div");
+      row.className = "dajb-region-overview-row";
+      if (p === this.currentPage) row.classList.add("dajb-region-selected");
+      row.dataset.regionAction = "goto-page";
+      row.dataset.page = String(p);
+      row.title = "Jump to this page";
+      const parts = [];
+      if (cfg.overrides?.length)  parts.push(`${cfg.overrides.length} override${cfg.overrides.length !== 1 ? "s" : ""}`);
+      if (cfg.exclusions?.length) parts.push(`${cfg.exclusions.length} exclusion${cfg.exclusions.length !== 1 ? "s" : ""}`);
+      row.innerHTML = `<strong>Page ${p}</strong> <span class="dajb-region-scope">${parts.join(", ")}</span>`;
+      root.appendChild(row);
+    }
+  }
+
+  // ── Region list drag-reorder ────────────────────────────────────────────────
+
+  _attachListDragDrop(list) {
+    if (!list) return;
+
+    list.addEventListener("dragstart", (ev) => {
+      const row = ev.target.closest(".dajb-region-draggable");
+      if (!row) { ev.preventDefault(); return; }
+      this._listDrag = { kind: row.dataset.kind, index: Number(row.dataset.index) };
+      ev.dataTransfer.effectAllowed = "move";
+      ev.dataTransfer.setData("text/plain", "region-row");
+      row.classList.add("dajb-dragging");
+    });
+
+    list.addEventListener("dragover", (ev) => {
+      if (!this._listDrag) return;
+      const row = ev.target.closest(".dajb-region-row");
+      this._clearListIndicators(list);
+      // Only allow dropping onto a row of the same group.
+      if (!row || row.dataset.kind !== this._listDrag.kind) { ev.dataTransfer.dropEffect = "none"; return; }
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = "move";
+      const rect = row.getBoundingClientRect();
+      const after = (ev.clientY - rect.top) / rect.height > 0.5;
+      row.classList.add(after ? "dajb-drop-after" : "dajb-drop-before");
+    });
+
+    list.addEventListener("drop", (ev) => {
+      if (!this._listDrag) return;
+      const row = ev.target.closest(".dajb-region-row");
+      this._clearListIndicators(list);
+      if (row && row.dataset.kind === this._listDrag.kind) {
+        ev.preventDefault();
+        const rect = row.getBoundingClientRect();
+        const after = (ev.clientY - rect.top) / rect.height > 0.5;
+        let to = Number(row.dataset.index) + (after ? 1 : 0);
+        this._reorderRegion(this._listDrag.kind, this._listDrag.index, to);
+      }
+      this._listDrag = null;
+    });
+
+    const cleanup = () => { this._clearListIndicators(list); this._listDrag = null;
+      list.querySelectorAll(".dajb-dragging").forEach(el => el.classList.remove("dajb-dragging")); };
+    list.addEventListener("dragend", cleanup);
+    list.addEventListener("dragleave", (ev) => { if (!list.contains(ev.relatedTarget)) this._clearListIndicators(list); });
+  }
+
+  _clearListIndicators(list) {
+    list?.querySelectorAll(".dajb-drop-before, .dajb-drop-after")
+      .forEach((el) => el.classList.remove("dajb-drop-before", "dajb-drop-after"));
+  }
+
+  _reorderRegion(kind, from, to) {
+    const rule = this.rule;
+    if (!rule) return;
+    const regions = RuleManager.normalizeRegions(rule);
+    const arr = kind === "default"
+      ? regions.defaults
+      : this._pageCfg(rule, this.currentPage).overrides;
+    if (from < 0 || from >= arr.length) return;
+    if (to > from) to -= 1; // account for removal shift
+    if (to === from) return;
+    const [moved] = arr.splice(from, 1);
+    arr.splice(Math.max(0, Math.min(to, arr.length)), 0, moved);
+    this._renumber(arr);
+    this._persist();
+    this._redrawOverlay();
+    this._renderSidePanel();
   }
 
   /** Push region changes into the live preview (regions already live on the rule). */
