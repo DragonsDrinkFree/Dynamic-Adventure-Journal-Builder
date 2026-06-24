@@ -53,13 +53,47 @@
       </div>
     </div>
 
-    {{!-- Right: Live Preview --}}
+    {{!-- Right: Live Preview / Select Regions tabs --}}
     <div class="dajb-preview-panel">
-      <div class="panel-header">
-        <span>Live Preview</span>
+      <div class="panel-header dajb-preview-tabbar">
+        <button type="button" class="dajb-preview-tab active" data-tab="preview">Live Preview</button>
+        <button type="button" class="dajb-preview-tab" data-tab="regions">Select Regions</button>
       </div>
-      <div class="dajb-preview-content" id="dajb-preview-content">
-        Load a PDF and select a rule to see matches.
+
+      {{!-- Live Preview tab --}}
+      <div class="dajb-tab-content" data-tab="preview">
+        <div class="dajb-preview-content" id="dajb-preview-content">
+          Load a PDF and select a rule to see matches.
+        </div>
+      </div>
+
+      {{!-- Select Regions tab --}}
+      <div class="dajb-tab-content dajb-region-tab" data-tab="regions" id="dajb-tab-regions" hidden>
+        <div class="dajb-region-bar">
+          <div class="dajb-region-tools">
+            <button type="button" class="dajb-rtool dajb-rtool-default" data-region-action="tool-default" title="Default region — applied at the same coordinates on every page in range. Draw multiple (e.g. columns); text is stitched in draw order.">
+              <span class="dajb-rtool-swatch"></span> Default
+            </button>
+            <button type="button" class="dajb-rtool dajb-rtool-exclusion" data-region-action="tool-exclusion" title="Exclusion — carve a section out of the default regions on THIS page only.">
+              <span class="dajb-rtool-swatch"></span> Exclusion
+            </button>
+            <button type="button" class="dajb-rtool dajb-rtool-override" data-region-action="tool-override" title="Override — ignore the default regions on THIS page and use the regions drawn here instead.">
+              <span class="dajb-rtool-swatch"></span> Override
+            </button>
+          </div>
+          <div class="dajb-region-nav">
+            <button type="button" data-region-action="prev-page" title="Previous page">◀</button>
+            <span class="dajb-region-pagelabel"></span>
+            <button type="button" data-region-action="next-page" title="Next page">▶</button>
+          </div>
+        </div>
+        <div class="dajb-region-canvas-wrap">
+          <div class="dajb-region-stage">
+            <canvas id="dajb-pdf-canvas" class="dajb-pdf-canvas"></canvas>
+            <canvas id="dajb-region-canvas" class="dajb-region-canvas"></canvas>
+          </div>
+        </div>
+        <div class="dajb-region-list" id="dajb-region-list"></div>
       </div>
     </div>
 

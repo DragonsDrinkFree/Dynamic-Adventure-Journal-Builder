@@ -343,6 +343,136 @@ export class PDFParser {
     return PDFParser.joinHyphenatedSplits(all);
   }
 
+  // ── Region-aware extraction ────────────────────────────────────────────────
+
+  /** True when a text item's anchor (x, y) falls inside a {x,y,w,h} rect (PDF units). */
+  static _inRect(item, r) {
+    return item.x >= r.x && item.x <= r.x + r.w &&
+           item.y >= r.y && item.y <= r.y + r.h;
+  }
+
+  /** Filter a page's items to those whose anchor falls inside a region rect. */
+  static filterItemsToRegion(items, region) {
+    return items.filter(it => PDFParser._inRect(it, region));
+  }
+
+  /**
+   * Sort a small set of items into reading order: top-to-bottom (descending Y),
+   * grouping items within `yTol` pt onto one line and sorting those left-to-right.
+   * Used for manually-drawn regions where the heuristic column detector is bypassed.
+   */
+  static sortItemsReadingOrder(items, yTol = 2) {
+    const col = [...items].sort((a, b) => b.y - a.y || a.x - b.x);
+    const result = [];
+    let line = [];
+    for (const item of col) {
+      if (!line.length || Math.abs(item.y - line[0].y) <= yTol) {
+        line.push(item);
+      } else {
+        line.sort((a, b) => a.x - b.x);
+        result.push(...line);
+        line = [item];
+      }
+    }
+    if (line.length) { line.sort((a, b) => a.x - b.x); result.push(...line); }
+    return result;
+  }
+
+  /**
+   * Stitch an ordered list of per-region item arrays into one continuous stream.
+   * Each array (already in reading order) is stacked vertically below the previous
+   * one by remapping its Y values, so downstream geometry (paragraph spacing, table
+   * detection) sees a single top-to-bottom document.  Intra-region Y gaps are
+   * preserved; a fixed gap separates regions/pages.
+   * @param {Array<Array>} arrays
+   * @returns {Array}
+   */
+  static stitchRegionStreams(arrays) {
+    const GAP = 50; // pt of separation between stacked regions
+    const out = [];
+    let topY = 1e6;
+    for (const items of arrays) {
+      if (!items?.length) continue;
+      const ys = items.map(i => i.y);
+      const rMax = Math.max(...ys);
+      const rMin = Math.min(...ys);
+      for (const it of items) out.push({ ...it, y: topY - (rMax - it.y) });
+      topY -= (rMax - rMin) + GAP;
+    }
+    return out;
+  }
+
+  /**
+   * Region-aware variant of getPagesItems.  For each page in `ranges`, picks the
+   * page's override regions if any, else the shared default regions, filters items
+   * into them (in `order`), subtracts the page's exclusion rects, sorts each region
+   * into reading order, then stitches everything into one continuous stream.
+   *
+   * The heuristic column reorder is intentionally bypassed: manual region order is
+   * authoritative (e.g. drawing left then right column selects the reading order).
+   *
+   * @param {Array<{start:number,end:number}>} ranges
+   * @param {{defaults:Array, pages:Object}} regions
+   * @returns {Promise<Array>}
+   */
+  async getPagesItemsForRegions(ranges, regions) {
+    if (!this._doc) throw new Error("No PDF loaded");
+    const defaults  = regions?.defaults ?? [];
+    const pageCfgs  = regions?.pages ?? {};
+    const streams   = [];
+
+    for (const { start, end } of ranges) {
+      for (let p = start; p <= Math.min(end, this._totalPages); p++) {
+        const pageItems  = await this.getPageItems(p);
+        const cfg        = pageCfgs[p] ?? pageCfgs[String(p)] ?? {};
+        const overrides  = cfg.overrides  ?? [];
+        const exclusions = cfg.exclusions ?? [];
+        // Override regions replace defaults for this page; an override page with no
+        // regions therefore contributes nothing (the whole page is excluded).
+        const active = overrides.length ? overrides : defaults;
+        if (!active.length) continue;
+
+        const ordered = [...active].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+        for (const region of ordered) {
+          let items = PDFParser.filterItemsToRegion(pageItems, region);
+          if (exclusions.length) {
+            items = items.filter(it => !exclusions.some(ex => PDFParser._inRect(it, ex)));
+          }
+          items = PDFParser.sortItemsReadingOrder(items);
+          if (items.length) streams.push(items);
+        }
+      }
+    }
+
+    return PDFParser.joinHyphenatedSplits(PDFParser.stitchRegionStreams(streams));
+  }
+
+  /**
+   * Render a PDF page onto a canvas at the given scale, sizing the canvas for the
+   * device pixel ratio.  Returns the pdf.js viewport (needed for canvas↔PDF
+   * coordinate conversion by the region selector).
+   * @param {number} pageNum
+   * @param {HTMLCanvasElement} canvas
+   * @param {number} scale
+   * @returns {Promise<Object>} the pdf.js PageViewport
+   */
+  async renderPageToCanvas(pageNum, canvas, scale = 1.3) {
+    if (!this._doc) throw new Error("No PDF loaded");
+    const page     = await this._doc.getPage(pageNum);
+    const dpr      = window.devicePixelRatio || 1;
+    const viewport = page.getViewport({ scale });
+
+    canvas.width        = Math.floor(viewport.width  * dpr);
+    canvas.height       = Math.floor(viewport.height * dpr);
+    canvas.style.width  = `${viewport.width}px`;
+    canvas.style.height = `${viewport.height}px`;
+
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    return viewport;
+  }
+
   /**
    * Merge items where a trailing hyphen indicates a column/line break mid-word.
    * Signal: item ends with `-` AND next item starts with a lowercase letter.

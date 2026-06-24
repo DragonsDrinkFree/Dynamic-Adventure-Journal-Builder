@@ -1,6 +1,7 @@
 import { RuleManager } from "./rule-manager.js";
 import { PDFParser } from "./pdf-parser.js";
 import { JournalCreator } from "./journal-creator.js";
+import { RegionSelector } from "./region-selector.js";
 
 const { HandlebarsApplicationMixin, ApplicationV2 } = foundry.applications.api;
 
@@ -47,6 +48,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     super(options);
     this.ruleManager = new RuleManager();
     this.pdfParser = new PDFParser();
+    this.regionSelector = new RegionSelector(this);
+    this.activeTab = "preview";
     this.selectedRuleId = null;
     this._pdfFileName = null;
     this._collapsedIds = new Set();
@@ -78,6 +81,27 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     if (typeof super._onRender === "function") super._onRender(context, options);
     this._refreshAllPanels();
     this._setupSelectionListener();
+    this._setupTabs();
+    this.regionSelector.onRender();
+  }
+
+  /** Wire the Live Preview / Select Regions tab switcher. */
+  _setupTabs() {
+    const tabs = this.element.querySelectorAll(".dajb-preview-tab");
+    if (!tabs.length) return;
+    tabs.forEach((btn) => {
+      btn.addEventListener("click", () => this._switchTab(btn.dataset.tab));
+    });
+    this._switchTab(this.activeTab);
+  }
+
+  _switchTab(tab) {
+    this.activeTab = tab;
+    this.element.querySelectorAll(".dajb-preview-tab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.tab === tab));
+    this.element.querySelectorAll(".dajb-tab-content").forEach((c) =>
+      c.hidden = c.dataset.tab !== tab);
+    if (tab === "regions") this.regionSelector.activate();
   }
 
   /** Clean up global listeners and pending timers when the window closes. */
@@ -347,6 +371,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           <span>Target Category</span>
           <input type="text" data-field="targetCategory" value="${this._esc(rule.targetCategory)}" placeholder="Category to place pages into" />
         </label>
+        <em class="dajb-hint" style="color:#9ade9a;padding:0 4px 8px">The target journal and category are created automatically if they don't exist — a separate New Category rule is optional.</em>
         ` : ""}
 
         ${isStrip  ? `<em class="dajb-hint dajb-strip-hint">Matched text is removed before boundary rules run.</em>` : ""}
@@ -624,7 +649,9 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         return;
       }
 
-      const items = await this.pdfParser.getPagesItems(ranges, {});
+      const items = RuleManager.hasRegions(topRule)
+        ? await this.pdfParser.getPagesItemsForRegions(ranges, topRule.regions)
+        : await this.pdfParser.getPagesItems(ranges, {});
       const sections = RuleManager.splitOnCombinedTargeting(items, topRule);
       const named = sections.filter(s => s.match);
 
@@ -1102,6 +1129,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         if (loadBtn) loadBtn.textContent = "Change PDF";
         ui.notifications.info(`DAJB | Loaded: ${file.name}`);
         this._renderPreview();
+        if (this.activeTab === "regions") this.regionSelector.activate();
       } catch (e) {
         ui.notifications.error(`DAJB | Failed to load PDF: ${e.message}`);
         console.error(e);
@@ -1189,6 +1217,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     });
     this._renderEditor();
     this._renderPreview();
+    if (this.activeTab === "regions") this.regionSelector.activate();
   }
 
   static _onMoveRuleUp(event, target) {

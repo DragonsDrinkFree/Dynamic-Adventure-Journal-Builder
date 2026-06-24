@@ -19,6 +19,12 @@ export class RuleManager {
       // top-level only
       pageRanges: "",
       targetJournal: "",
+      // Region selection (top-level page rules only).
+      //   defaults: [{ id, order, x, y, w, h }]  — applied to EVERY page in range
+      //   pages:    { [pageNum]: { exclusions:[{x,y,w,h}], overrides:[{id,order,x,y,w,h}] } }
+      // Coordinates are stored in PDF user units (bottom-left origin), so they are
+      // independent of the on-screen render scale.
+      regions: { defaults: [], pages: {} },
       // shared
       targetCategory: "",   // category to create (create-category) or place content into (create-page)
       // targeting
@@ -202,6 +208,8 @@ export class RuleManager {
       throw new Error('JSON must have a top-level "rules" array');
     this.rules = data.rules;
     this._walk(this.rules, (rule) => {
+      // Ensure the regions container exists and is well-formed on loaded rules.
+      RuleManager.normalizeRegions(rule);
       // Ensure font size fields exist (min/max are now intentional advanced fields)
       if (rule.fontSize    === undefined) rule.fontSize    = null;
       if (rule.minFontSize === undefined) rule.minFontSize = null;
@@ -237,6 +245,34 @@ export class RuleManager {
         if (fo.lineReturnAfter  === undefined) fo.lineReturnAfter  = false;
       }
     });
+  }
+
+  // ── Regions ────────────────────────────────────────────────────────────────
+
+  /** Ensure a rule's `regions` container exists and is well-formed. Returns it. */
+  static normalizeRegions(rule) {
+    if (!rule.regions || typeof rule.regions !== "object") {
+      rule.regions = { defaults: [], pages: {} };
+    }
+    if (!Array.isArray(rule.regions.defaults)) rule.regions.defaults = [];
+    if (!rule.regions.pages || typeof rule.regions.pages !== "object") rule.regions.pages = {};
+    for (const cfg of Object.values(rule.regions.pages)) {
+      if (!Array.isArray(cfg.exclusions)) cfg.exclusions = [];
+      if (!Array.isArray(cfg.overrides))  cfg.overrides  = [];
+    }
+    return rule.regions;
+  }
+
+  /**
+   * True when a rule defines region constraints that should drive text extraction:
+   * any default region, or any page-specific override region.  (Exclusions only
+   * matter relative to defaults, so they don't independently enable region mode.)
+   */
+  static hasRegions(rule) {
+    const r = rule?.regions;
+    if (!r) return false;
+    if (r.defaults?.length) return true;
+    return Object.values(r.pages ?? {}).some(p => p.overrides?.length);
   }
 
   // ── Page-range parser ─────────────────────────────────────────────────────

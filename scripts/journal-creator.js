@@ -55,7 +55,9 @@ export class JournalCreator {
       return;
     }
 
-    const items = await pdfParser.getPagesItems(ranges);
+    const items = RuleManager.hasRegions(rule)
+      ? await pdfParser.getPagesItemsForRegions(ranges, rule.regions)
+      : await pdfParser.getPagesItems(ranges);
     const sections = RuleManager.splitOnCombinedTargeting(items, rule);
     const namedSections = sections.filter(s => s.match !== null);
 
