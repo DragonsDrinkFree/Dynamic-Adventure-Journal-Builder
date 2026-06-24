@@ -55,6 +55,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     this._selectionChangeBound = null;
     this._selectionDebounce = null;
     this._previewRefreshTimer = null;
+    this._regionRefreshTimer = null;
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -115,6 +116,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     this._dismissSelectionToolbar();
     if (this._selectionDebounce) { clearTimeout(this._selectionDebounce); this._selectionDebounce = null; }
     if (this._previewRefreshTimer) { clearTimeout(this._previewRefreshTimer); this._previewRefreshTimer = null; }
+    if (this._regionRefreshTimer) { clearTimeout(this._regionRefreshTimer); this._regionRefreshTimer = null; }
     if (typeof super._onClose === "function") super._onClose(options);
   }
 
@@ -506,6 +508,11 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         <fieldset class="dajb-fieldset">
           <legend>Table Options</legend>
           <label class="dajb-field dajb-field-check">
+            <input type="checkbox" data-field="importTableRegions" ${rule.importTableRegions ? "checked" : ""} />
+            <span>Import Table Regions</span>
+          </label>
+          <em class="dajb-hint">Use the Table Override regions drawn on the Select Regions tab as the table locations. When on, this overrides Auto-detect and font/regex targeting.</em>
+          <label class="dajb-field dajb-field-check">
             <input type="checkbox" data-field="autoDetect" ${rule.autoDetect ? "checked" : ""} />
             <span>Auto-detect tables</span>
           </label>
@@ -697,12 +704,19 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     if (["pattern", "flags", "pageRanges", "captureGroup", "fontSize", "minFontSize", "maxFontSize",
          "groupName", "breakOnSentence",
          "outputFormat.headingLevel", "outputFormat.additionalFormatting", "outputFormat.paragraphDetection",
-         "firstRowHeader", "columnGapMinPt", "columnGapMultiplier", "maxColumns", "autoDetect",
+         "firstRowHeader", "columnGapMinPt", "columnGapMultiplier", "maxColumns", "autoDetect", "importTableRegions",
          "formatOptions.bold", "formatOptions.underline", "formatOptions.indent",
          "formatOptions.lineReturnBefore", "formatOptions.lineReturnAfter"].includes(field)) {
       const isTextInput = ["pattern", "flags", "pageRanges", "groupName", "fontSize", "minFontSize", "maxFontSize", "columnGapMinPt", "columnGapMultiplier", "maxColumns"].includes(field);
       const isFontSizeRange = field === "minFontSize" || field === "maxFontSize";
       this._schedulePreviewRefresh(!isTextInput, isFontSizeRange ? 4000 : undefined);
+    }
+
+    // Page-range changes alter the Select Regions page list — refresh that tab too
+    // (debounced so typing a range doesn't re-render the PDF on every keystroke).
+    if (field === "pageRanges" && this.activeTab === "regions") {
+      clearTimeout(this._regionRefreshTimer);
+      this._regionRefreshTimer = setTimeout(() => this.regionSelector.activate(), 600);
     }
   }
 
@@ -821,6 +835,32 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     const el = document.createElement("div");
 
     if (sec.match === null) {
+      const items = sec.bodyItems ?? [];
+
+      // Inherited table / format-text rules apply to unmatched (preamble) content
+      // too — so a Table Override region that falls inside otherwise-unstructured
+      // text still renders as a table instead of greyed-out prose.
+      const inhTable = rule?.children?.find(c =>
+        c.ruleType === 'create-table' && !c.disabled && (c.importTableRegions || c.autoDetect)) ?? null;
+      const inhFormat = rule?.children?.filter(c =>
+        c.ruleType === 'create-format-text' && !c.disabled && c.pattern) ?? [];
+      const hasTaggedTable = inhTable && (
+        inhTable.importTableRegions
+          ? items.some(it => it.tableRegionId != null)
+          : PDFParser.detectTableBoundaries(items).length > 0);
+
+      if (items.length && hasTaggedTable) {
+        el.className = "dajb-preview-section depth-" + depth;
+        this._appendDetectedTables(el, items, inhTable, inhFormat);
+        return el;
+      }
+      if (items.length && inhFormat.length) {
+        el.className = "dajb-preview-body-text";
+        const rawText = items.map(i => i.text).join(' ').trim();
+        el.innerHTML = `<p>${JournalCreator._applyFormatTextRules(rawText, inhFormat)}</p>`;
+        return el;
+      }
+
       // Preamble text — shown greyed out, rendered as item spans for selectability
       el.className = "dajb-preview-preamble";
       if (sec.bodyItems?.length) {
@@ -1080,74 +1120,11 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           maxColumns:          tableChild.maxColumns          ?? 0,
           preserveFormatting:  tableChild.preserveFormatting  ?? false,
         };
-        if (tableChild.autoDetect) {
-          const detected = PDFParser.detectTableBoundaries(strippedItems);
-          if (!detected.length) {
-            const ftRules = rule.children?.filter(c =>
-              c.ruleType === 'create-format-text' && !c.disabled && c.pattern
-            ) ?? [];
-            const noTbl = document.createElement('div');
-            noTbl.className = 'dajb-preview-body-text';
-            if (ftRules.length && strippedItems.length) {
-              const rawText = strippedItems.map(i => i.text).join(' ').trim();
-              noTbl.innerHTML = `<p>${JournalCreator._applyFormatTextRules(rawText, ftRules)}</p>`;
-            } else {
-              this._appendItemSpans(noTbl, strippedItems, { limit: 100 });
-            }
-            el.appendChild(noTbl);
-          } else {
-            const inTable = new Set(detected.flat());
-            const tableRanges = detected.map(tItems => ({
-              yMax: Math.max(...tItems.map(i => i.y)),
-              items: tItems,
-            })).sort((a, b) => b.yMax - a.yMax);
-
-            const allSorted = [...strippedItems].sort((a, b) => b.y - a.y);
-            let ti = 0;
-            let proseItems = [];
-
-            const flushProse = () => {
-              if (!proseItems.length) return;
-              const p = document.createElement('div');
-              p.className = 'dajb-preview-body-text';
-              this._appendItemSpans(p, proseItems, { limit: 60 });
-              el.appendChild(p);
-              proseItems = [];
-            };
-
-            for (const item of allSorted) {
-              while (ti < tableRanges.length && tableRanges[ti].yMax >= item.y) {
-                flushProse();
-                const { html: tHtml, rowCount, colCount } =
-                  PDFParser.parseTableRegion(tableRanges[ti].items, tableOpts);
-                const wrapper = document.createElement('div');
-                wrapper.className = 'dajb-preview-table-wrapper';
-                wrapper.innerHTML = tHtml || '';
-                const badge = document.createElement('div');
-                badge.className = 'dajb-preview-table-badge';
-                badge.textContent = `${rowCount} rows × ${colCount} col${colCount !== 1 ? 's' : ''} (auto-detected)`;
-                wrapper.appendChild(badge);
-                el.appendChild(wrapper);
-                ti++;
-              }
-              if (!inTable.has(item)) proseItems.push(item);
-            }
-            while (ti < tableRanges.length) {
-              flushProse();
-              const { html: tHtml, rowCount, colCount } =
-                PDFParser.parseTableRegion(tableRanges[ti].items, tableOpts);
-              const wrapper = document.createElement('div');
-              wrapper.className = 'dajb-preview-table-wrapper';
-              wrapper.innerHTML = tHtml || '';
-              const badge = document.createElement('div');
-              badge.className = 'dajb-preview-table-badge';
-              badge.textContent = `${rowCount} rows × ${colCount} col${colCount !== 1 ? 's' : ''} (auto-detected)`;
-              wrapper.appendChild(badge);
-              el.appendChild(wrapper);
-              ti++;
-            }
-            flushProse();
-          }
+        if (tableChild.importTableRegions || tableChild.autoDetect) {
+          const ftRules = rule.children?.filter(c =>
+            c.ruleType === 'create-format-text' && !c.disabled && c.pattern
+          ) ?? [];
+          this._appendDetectedTables(el, strippedItems, tableChild, ftRules);
           return el; // early return — we've fully rendered the body
         }
 
@@ -1223,6 +1200,78 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     }
 
     return el;
+  }
+
+  /**
+   * Render a create-table child's importTableRegions / autoDetect output into `el`,
+   * interleaving detected tables with surrounding prose (top-to-bottom by Y).
+   * Shared by the table child branch and the preamble branch (inherited tables).
+   * @returns {boolean} true if at least one table was rendered.
+   */
+  _appendDetectedTables(el, items, tableChild, formatTextRules = []) {
+    if (!(tableChild.importTableRegions || tableChild.autoDetect)) return false;
+    const tableOpts = {
+      firstRowHeader:      tableChild.firstRowHeader      ?? true,
+      columnGapMinPt:      tableChild.columnGapMinPt      ?? 4,
+      columnGapMultiplier: tableChild.columnGapMultiplier ?? 0,
+      maxColumns:          tableChild.maxColumns          ?? 0,
+      preserveFormatting:  tableChild.preserveFormatting  ?? false,
+    };
+    const detected = tableChild.importTableRegions
+      ? PDFParser.groupItemsByTableRegion(items)
+      : PDFParser.detectTableBoundaries(items);
+    const detectLabel = tableChild.importTableRegions ? "table region" : "auto-detected";
+
+    if (!detected.length) {
+      const noTbl = document.createElement('div');
+      noTbl.className = 'dajb-preview-body-text';
+      if (formatTextRules.length && items.length) {
+        const rawText = items.map(i => i.text).join(' ').trim();
+        noTbl.innerHTML = `<p>${JournalCreator._applyFormatTextRules(rawText, formatTextRules)}</p>`;
+      } else {
+        this._appendItemSpans(noTbl, items, { limit: 100 });
+      }
+      el.appendChild(noTbl);
+      return false;
+    }
+
+    const inTable = new Set(detected.flat());
+    const tableRanges = detected.map(tItems => ({
+      yMax: Math.max(...tItems.map(i => i.y)),
+      items: tItems,
+    })).sort((a, b) => b.yMax - a.yMax);
+
+    const allSorted = [...items].sort((a, b) => b.y - a.y);
+    let ti = 0;
+    let proseItems = [];
+
+    const flushProse = () => {
+      if (!proseItems.length) return;
+      const p = document.createElement('div');
+      p.className = 'dajb-preview-body-text';
+      this._appendItemSpans(p, proseItems, { limit: 60 });
+      el.appendChild(p);
+      proseItems = [];
+    };
+    const emitTable = (rangeItems) => {
+      const { html: tHtml, rowCount, colCount } = PDFParser.parseTableRegion(rangeItems, tableOpts);
+      const wrapper = document.createElement('div');
+      wrapper.className = 'dajb-preview-table-wrapper';
+      wrapper.innerHTML = tHtml || '';
+      const badge = document.createElement('div');
+      badge.className = 'dajb-preview-table-badge';
+      badge.textContent = `${rowCount} rows × ${colCount} col${colCount !== 1 ? 's' : ''} (${detectLabel})`;
+      wrapper.appendChild(badge);
+      el.appendChild(wrapper);
+    };
+
+    for (const item of allSorted) {
+      while (ti < tableRanges.length && tableRanges[ti].yMax >= item.y) { flushProse(); emitTable(tableRanges[ti].items); ti++; }
+      if (!inTable.has(item)) proseItems.push(item);
+    }
+    while (ti < tableRanges.length) { flushProse(); emitTable(tableRanges[ti].items); ti++; }
+    flushProse();
+    return true;
   }
 
   /** Get text for a rule, applying font criteria as a pre-filter when paired with a regex. */

@@ -417,34 +417,82 @@ export class PDFParser {
    */
   async getPagesItemsForRegions(ranges, regions) {
     if (!this._doc) throw new Error("No PDF loaded");
-    const defaults  = regions?.defaults ?? [];
-    const pageCfgs  = regions?.pages ?? {};
-    const streams   = [];
+    const defaults    = regions?.defaults ?? [];
+    const defaultsB   = regions?.defaultsB ?? [];
+    const alternating = !!regions?.alternating;
+    const pageCfgs    = regions?.pages ?? {};
+    const streams     = [];
+    let pageIndex     = -1; // position within the flattened range (for A/B alternation)
+
+    // Tag items that fall inside a Table Override rect (clone, so we never mutate
+    // the cached page items).  Tags ride through stitching and section-splitting.
+    const tagTables = (items, tables) => !tables?.length ? items
+      : items.map(it => {
+          const t = tables.find(tb => PDFParser._inRect(it, tb));
+          return t ? { ...it, tableRegionId: t.id } : it;
+        });
 
     for (const { start, end } of ranges) {
       for (let p = start; p <= Math.min(end, this._totalPages); p++) {
+        pageIndex++;
         const pageItems  = await this.getPageItems(p);
         const cfg        = pageCfgs[p] ?? pageCfgs[String(p)] ?? {};
         const overrides  = cfg.overrides  ?? [];
         const exclusions = cfg.exclusions ?? [];
-        // Override regions replace defaults for this page; an override page with no
-        // regions therefore contributes nothing (the whole page is excluded).
-        const active = overrides.length ? overrides : defaults;
-        if (!active.length) continue;
+        const tables     = cfg.tables     ?? [];
+        // Alternating mode: even page-index → group A (defaults), odd → group B.
+        const groupDefaults = alternating
+          ? (pageIndex % 2 === 0 ? defaults : defaultsB)
+          : defaults;
+        const active = overrides.length ? overrides : groupDefaults;
 
-        const ordered = [...active].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-        for (const region of ordered) {
-          let items = PDFParser.filterItemsToRegion(pageItems, region);
+        if (active.length) {
+          const ordered = [...active].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+          for (const region of ordered) {
+            let items = PDFParser.filterItemsToRegion(pageItems, region);
+            if (exclusions.length) {
+              items = items.filter(it => !exclusions.some(ex => PDFParser._inRect(it, ex)));
+            }
+            items = PDFParser.sortItemsReadingOrder(items);
+            items = tagTables(items, tables);
+            if (items.length) streams.push(items);
+          }
+        } else if (tables.length) {
+          // No content regions on this page, but it has Table Override regions:
+          // keep the whole page (minus exclusions) so its text isn't dropped, and
+          // tag the table items.  Use the heuristic column reorder for reading order.
+          let items = pageItems;
           if (exclusions.length) {
             items = items.filter(it => !exclusions.some(ex => PDFParser._inRect(it, ex)));
           }
-          items = PDFParser.sortItemsReadingOrder(items);
+          items = PDFParser.reorderForColumns(items, this.getPageWidth(p));
+          items = tagTables(items, tables);
           if (items.length) streams.push(items);
         }
+        // else: override page with no regions → contributes nothing (whole page excluded).
       }
     }
 
     return PDFParser.joinHyphenatedSplits(PDFParser.stitchRegionStreams(streams));
+  }
+
+  /**
+   * Group items by their `tableRegionId` tag (set during region-aware extraction
+   * for items inside a Table Override region).  Returns one item array per region,
+   * in first-appearance order — the same shape as detectTableBoundaries, so the
+   * table-interleave code consumes it unchanged.
+   * @param {Array} items
+   * @returns {Array<Array>}
+   */
+  static groupItemsByTableRegion(items) {
+    const map = new Map();
+    for (const it of items) {
+      const id = it.tableRegionId;
+      if (id == null) continue;
+      if (!map.has(id)) map.set(id, []);
+      map.get(id).push(it);
+    }
+    return [...map.values()];
   }
 
   /**
@@ -468,9 +516,10 @@ export class PDFParser {
     if (opts.fitWidth) {
       const baseWidth = page.getViewport({ scale: 1 }).width;
       if (baseWidth > 0) {
-        const maxScale = opts.maxScale ?? 2.5;
-        const minScale = opts.minScale ?? 0.25;
-        scale = Math.max(minScale, Math.min(maxScale, opts.fitWidth / baseWidth));
+        const maxScale = opts.maxScale ?? 6;
+        const minScale = opts.minScale ?? 0.1;
+        const zoom     = opts.zoom ?? 1;   // user zoom multiplier, relative to fit
+        scale = Math.max(minScale, Math.min(maxScale, (opts.fitWidth / baseWidth) * zoom));
       }
     }
 

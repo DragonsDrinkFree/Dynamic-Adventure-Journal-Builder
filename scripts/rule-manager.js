@@ -24,7 +24,7 @@ export class RuleManager {
       //   pages:    { [pageNum]: { exclusions:[{x,y,w,h}], overrides:[{id,order,x,y,w,h}] } }
       // Coordinates are stored in PDF user units (bottom-left origin), so they are
       // independent of the on-screen render scale.
-      regions: { defaults: [], pages: {} },
+      regions: { defaults: [], defaultsB: [], pages: {}, alternating: false },
       // shared
       targetCategory: "",   // category to create (create-category) or place content into (create-page)
       // targeting
@@ -45,6 +45,7 @@ export class RuleManager {
       columnGapMultiplier: 0,  // 0 = off; >0 = gap must be ≥ median×multiplier (filters noise)
       maxColumns: 0,           // 0 = auto; N = cap column count at N (keeps N-1 largest gaps)
       autoDetect: false,       // create-table: detect table regions geometrically
+      importTableRegions: false, // create-table: use Table Override regions as table locations
       outputFormat: {
         headingLevel: 1,
         additionalFormatting: "", // "" | "ul" | "ol" | "blockquote" | "pre" | "secret"
@@ -219,6 +220,7 @@ export class RuleManager {
         if (rule.firstRowHeader === undefined) rule.firstRowHeader = true;
         if (rule.columnGapMinPt === undefined) rule.columnGapMinPt = 4;
         if (rule.autoDetect === undefined) rule.autoDetect = false;
+        if (rule.importTableRegions === undefined) rule.importTableRegions = false;
         if (rule.columnGapMultiplier === undefined) rule.columnGapMultiplier = 0;
         if (rule.maxColumns === undefined) rule.maxColumns = 0;
       }
@@ -240,13 +242,16 @@ export class RuleManager {
   /** Ensure a rule's `regions` container exists and is well-formed. Returns it. */
   static normalizeRegions(rule) {
     if (!rule.regions || typeof rule.regions !== "object") {
-      rule.regions = { defaults: [], pages: {} };
+      rule.regions = { defaults: [], defaultsB: [], pages: {}, alternating: false };
     }
     if (!Array.isArray(rule.regions.defaults)) rule.regions.defaults = [];
+    if (!Array.isArray(rule.regions.defaultsB)) rule.regions.defaultsB = [];
+    if (typeof rule.regions.alternating !== "boolean") rule.regions.alternating = false;
     if (!rule.regions.pages || typeof rule.regions.pages !== "object") rule.regions.pages = {};
     for (const cfg of Object.values(rule.regions.pages)) {
       if (!Array.isArray(cfg.exclusions)) cfg.exclusions = [];
       if (!Array.isArray(cfg.overrides))  cfg.overrides  = [];
+      if (!Array.isArray(cfg.tables))     cfg.tables     = [];
     }
     return rule.regions;
   }
@@ -259,8 +264,10 @@ export class RuleManager {
   static hasRegions(rule) {
     const r = rule?.regions;
     if (!r) return false;
-    if (r.defaults?.length) return true;
-    return Object.values(r.pages ?? {}).some(p => p.overrides?.length);
+    if (r.defaults?.length || r.defaultsB?.length) return true;
+    // Override regions reshape the stream; table regions only tag items, but we
+    // still need the region-aware path to run so that tagging happens.
+    return Object.values(r.pages ?? {}).some(p => p.overrides?.length || p.tables?.length);
   }
 
   // ── Page-range parser ─────────────────────────────────────────────────────
@@ -534,6 +541,18 @@ export class RuleManager {
         for (const m of text.matchAll(regex)) {
           boundaries.push({ start: m.index, end: m.index + m[0].length, title: (cg > 0 ? m[cg] : m[0])?.trim() ?? '', source: 'regex', match: m });
         }
+      }
+    }
+
+    // Table Override filter: a boundary whose title lies entirely inside a Table
+    // Override region is table content, not a section header.  Drop it so the items
+    // stay in the body for a Table rule (Import Table Regions) to claim — this keeps
+    // sibling section rules from "stealing" a table's heading row.  (No-op when no
+    // items are tagged, since item.tableRegionId is then always undefined.)
+    if (boundaries.length) {
+      for (let i = boundaries.length - 1; i >= 0; i--) {
+        const its = sliceItems(boundaries[i].start, boundaries[i].end);
+        if (its.length && its.every(it => it.tableRegionId != null)) boundaries.splice(i, 1);
       }
     }
 

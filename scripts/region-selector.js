@@ -22,6 +22,7 @@ export class RegionSelector {
     this.app = app;
     this.tool = null;            // "default" | "exclusion" | "override" | "edit" | null
     this.scale = 1.3;
+    this.zoom = 1;               // user zoom multiplier relative to fit-to-width (1 = fit)
     this.currentPage = null;     // actual PDF page number
     this.viewport = null;        // pdf.js PageViewport for the rendered page
     this.dragStart = null;       // { x, y } in canvas buffer px
@@ -94,6 +95,7 @@ export class RegionSelector {
   /** Called when the user switches to the Select Regions tab. */
   async activate() {
     this._syncToolButtons();
+    this._syncAlternatingUI();
     const rule = this.rule;
     const pages = this.pages;
 
@@ -140,15 +142,27 @@ export class RegionSelector {
   _onAction(action, btn) {
     switch (action) {
       case "tool-default":   this._toggleTool("default");   break;
+      case "tool-defaultB":  this._toggleTool("defaultB");  break;
+      case "toggle-alternating": this._toggleAlternating(); break;
       case "tool-exclusion": this._toggleTool("exclusion"); break;
       case "tool-override":  this._toggleTool("override");  break;
+      case "tool-table":     this._toggleTool("table");     break;
       case "tool-edit":      this._toggleTool("edit");      break;
       case "prev-page":      this._stepPage(-1); break;
       case "next-page":      this._stepPage(1);  break;
       case "delete-region":  this._deleteRegion(btn); break;
       case "goto-page":      this._gotoPage(Number(btn.dataset.page)); break;
       case "toggle-side":    this._toggleSide(); break;
+      case "zoom-in":        this._setZoom(this.zoom * 1.25); break;
+      case "zoom-out":       this._setZoom(this.zoom / 1.25); break;
+      case "zoom-fit":       this._setZoom(1); break;
     }
+  }
+
+  /** Set the zoom multiplier (relative to fit-to-width) and re-render the page. */
+  _setZoom(z) {
+    this.zoom = Math.max(0.25, Math.min(4, z));
+    this._renderCurrentPage();
   }
 
   _toggleSide() {
@@ -172,10 +186,42 @@ export class RegionSelector {
     if (overlay) overlay.style.cursor = this.tool ? "crosshair" : "default";
   }
 
+  /** Which default group applies to the current page: 'A' (even index) or 'B' (odd). */
+  _currentPageGroup() {
+    const regions = this.rule?.regions;
+    if (!regions?.alternating) return "A";
+    const idx = this.pages.indexOf(this.currentPage);
+    return idx % 2 === 0 ? "A" : "B";
+  }
+
+  _toggleAlternating() {
+    const rule = this.rule;
+    if (!rule) return;
+    const regions = RuleManager.normalizeRegions(rule);
+    regions.alternating = !regions.alternating;
+    if (!regions.alternating && this.tool === "defaultB") this.tool = null;
+    this._syncAlternatingUI();
+    this._syncToolButtons();
+    this._persist();
+    this._renderCurrentPage();
+  }
+
+  /** Reflect alternating state into the toolbar (toggle state, B button, A label). */
+  _syncAlternatingUI() {
+    const tab = this.app.element?.querySelector("#dajb-tab-regions");
+    if (!tab) return;
+    const alt = !!this.rule?.regions?.alternating;
+    tab.querySelector('[data-region-action="toggle-alternating"]')?.classList.toggle("dajb-active", alt);
+    const bBtn = tab.querySelector('[data-region-action="tool-defaultB"]');
+    if (bBtn) bBtn.hidden = !alt;
+    const aLabel = tab.querySelector('[data-region-action="tool-default"] .dajb-rtool-label');
+    if (aLabel) aLabel.textContent = alt ? "Default A" : "Default";
+  }
+
   _syncToolButtons() {
     const tab = this.app.element?.querySelector("#dajb-tab-regions");
     if (!tab) return;
-    for (const t of ["default", "exclusion", "override", "edit"]) {
+    for (const t of ["default", "defaultB", "exclusion", "override", "table", "edit"]) {
       tab.querySelector(`[data-region-action="tool-${t}"]`)
         ?.classList.toggle("dajb-active", this.tool === t);
     }
@@ -233,7 +279,7 @@ export class RegionSelector {
 
     try {
       const availWidth = Math.max(120, (wrap?.clientWidth ?? 0) - 16); // minus 8px padding each side
-      this.viewport = await this.pdfParser.renderPageToCanvas(this.currentPage, pdfCanvas, { fitWidth: availWidth });
+      this.viewport = await this.pdfParser.renderPageToCanvas(this.currentPage, pdfCanvas, { fitWidth: availWidth, zoom: this.zoom });
       overlay.width        = pdfCanvas.width;
       overlay.height       = pdfCanvas.height;
       overlay.style.width  = pdfCanvas.style.width;
@@ -247,11 +293,15 @@ export class RegionSelector {
     if (label) {
       const idx = pages.indexOf(this.currentPage);
       const cfg = this._pageCfgRead(rule, this.currentPage);
-      const marked = (cfg.overrides.length || cfg.exclusions.length) ? " ●" : "";
+      const marked = (cfg.overrides.length || cfg.exclusions.length || cfg.tables.length) ? " ●" : "";
       const pos = idx >= 0 ? ` (${idx + 1}/${pages.length})` : "";
-      label.textContent = `Page ${this.currentPage}${pos}${marked}`;
+      const grp = rule.regions?.alternating ? ` [${this._currentPageGroup()}]` : "";
+      label.textContent = `Page ${this.currentPage}${pos}${grp}${marked}`;
       label.classList.toggle("dajb-has-exceptions", !!marked);
     }
+
+    const zoomLabel = tab.querySelector(".dajb-region-zoomlabel");
+    if (zoomLabel) zoomLabel.textContent = `${Math.round(this.zoom * 100)}%`;
 
     this._redrawOverlay();
     this._renderSidePanel();
@@ -299,14 +349,21 @@ export class RegionSelector {
       }
     };
 
-    for (const r of regions.defaults) {
+    // Active default group for this page (A on even index, B on odd) when alternating.
+    const group = this._currentPageGroup();
+    const activeDefaults = (regions.alternating && group === "B") ? regions.defaultsB : regions.defaults;
+    const defLabel = regions.alternating ? `default ${group}` : "default";
+    const defStroke = (regions.alternating && group === "B") ? "rgba(64,196,196,0.85)" : "rgba(100,200,100,0.85)";
+    const defFill   = (regions.alternating && group === "B") ? "rgba(64,196,196,0.12)" : "rgba(100,200,100,0.12)";
+    for (const r of activeDefaults) {
       drawRect(r,
-        pageOverridden ? "rgba(120,200,120,0.4)" : "rgba(100,200,100,0.85)",
-        pageOverridden ? "rgba(120,200,120,0.05)" : "rgba(100,200,100,0.12)",
-        pageOverridden ? "default (inactive)" : "default", pageOverridden);
+        pageOverridden ? "rgba(150,170,170,0.4)" : defStroke,
+        pageOverridden ? "rgba(150,170,170,0.05)" : defFill,
+        pageOverridden ? `${defLabel} (inactive)` : defLabel, pageOverridden);
     }
     for (const r of cfg.overrides)  drawRect(r, "rgba(100,160,255,0.9)", "rgba(100,160,255,0.15)", "override");
     for (const r of cfg.exclusions) drawRect(r, "rgba(224,120,120,0.9)", "rgba(224,120,120,0.18)", "exclude");
+    for (const r of cfg.tables)     drawRect(r, "rgba(167,139,250,0.9)", "rgba(167,139,250,0.18)", "table");
 
     // Selected-region handles (edit tool)
     if (this.tool === "edit" && this.selectedRegion) {
@@ -450,9 +507,14 @@ export class RegionSelector {
     const regions = RuleManager.normalizeRegions(rule);
     const cfg = this._pageCfgRead(rule, this.currentPage);
     const out = [];
-    for (const ref of regions.defaults) out.push({ kind: "default", ref });
+    // Only the default group active for this page is editable here.
+    const group = this._currentPageGroup();
+    const activeDefaults = (regions.alternating && group === "B") ? regions.defaultsB : regions.defaults;
+    const defKind = (regions.alternating && group === "B") ? "defaultB" : "default";
+    for (const ref of activeDefaults) out.push({ kind: defKind, ref });
     for (const ref of cfg.overrides)    out.push({ kind: "override", ref });
     for (const ref of cfg.exclusions)   out.push({ kind: "exclusion", ref });
+    for (const ref of cfg.tables)       out.push({ kind: "table", ref });
     return out;
   }
 
@@ -486,10 +548,13 @@ export class RegionSelector {
 
     if (this.tool === "default") {
       regions.defaults.push({ id: foundry.utils.randomID(), order: regions.defaults.length, ...pdfRect });
+    } else if (this.tool === "defaultB") {
+      regions.defaultsB.push({ id: foundry.utils.randomID(), order: regions.defaultsB.length, ...pdfRect });
     } else {
       const cfg = this._pageCfg(rule, this.currentPage);
       if (this.tool === "exclusion") cfg.exclusions.push({ ...pdfRect });
       else if (this.tool === "override") cfg.overrides.push({ id: foundry.utils.randomID(), order: cfg.overrides.length, ...pdfRect });
+      else if (this.tool === "table") cfg.tables.push({ id: foundry.utils.randomID(), ...pdfRect });
     }
 
     this._persist();
@@ -500,14 +565,17 @@ export class RegionSelector {
   _pageCfg(rule, page) {
     const regions = RuleManager.normalizeRegions(rule);
     const key = String(page);
-    if (!regions.pages[key]) regions.pages[key] = { exclusions: [], overrides: [] };
-    return regions.pages[key];
+    if (!regions.pages[key]) regions.pages[key] = { exclusions: [], overrides: [], tables: [] };
+    const cfg = regions.pages[key];
+    if (!Array.isArray(cfg.tables)) cfg.tables = [];
+    return cfg;
   }
 
   /** Read-only page config (never mutates the rule). */
   _pageCfgRead(rule, page) {
     const regions = rule.regions ?? {};
-    return regions.pages?.[String(page)] ?? { exclusions: [], overrides: [] };
+    const cfg = regions.pages?.[String(page)] ?? {};
+    return { exclusions: cfg.exclusions ?? [], overrides: cfg.overrides ?? [], tables: cfg.tables ?? [] };
   }
 
   _deleteRegion(btn) {
@@ -521,6 +589,9 @@ export class RegionSelector {
     if (kind === "default") {
       regions.defaults = regions.defaults.filter(r => r.id !== id);
       this._renumber(regions.defaults);
+    } else if (kind === "defaultB") {
+      regions.defaultsB = regions.defaultsB.filter(r => r.id !== id);
+      this._renumber(regions.defaultsB);
     } else {
       const cfg = this._pageCfg(rule, this.currentPage);
       if (kind === "override") {
@@ -528,8 +599,10 @@ export class RegionSelector {
         this._renumber(cfg.overrides);
       } else if (kind === "exclusion") {
         cfg.exclusions = cfg.exclusions.filter((_, i) => i !== index);
+      } else if (kind === "table") {
+        cfg.tables = id ? cfg.tables.filter(r => r.id !== id) : cfg.tables.filter((_, i) => i !== index);
       }
-      if (!cfg.overrides.length && !cfg.exclusions.length) delete regions.pages[String(this.currentPage)];
+      if (!cfg.overrides.length && !cfg.exclusions.length && !cfg.tables.length) delete regions.pages[String(this.currentPage)];
     }
 
     this.selectedRegion = null;
@@ -591,14 +664,24 @@ export class RegionSelector {
       list.appendChild(row);
     };
 
-    if (!regions.defaults.length && !cfg.overrides.length && !cfg.exclusions.length) {
+    // Show the default group active for this page (A on even index, B on odd).
+    const group = this._currentPageGroup();
+    const useB = regions.alternating && group === "B";
+    const groupArr   = useB ? regions.defaultsB : regions.defaults;
+    const groupKind  = useB ? "defaultB" : "default";
+    const groupLabel = regions.alternating ? `Default ${group}` : "Default";
+    const groupScope = regions.alternating ? `all ${group} pages` : "all pages";
+    const groupColour = useB ? "rgba(64,196,196,0.85)" : "rgba(100,200,100,0.85)";
+
+    if (!groupArr.length && !cfg.overrides.length && !cfg.exclusions.length && !cfg.tables.length) {
       list.innerHTML = '<div class="dajb-region-empty">No regions yet. Pick a tool and drag a box on the page.</div>';
       return;
     }
 
-    regions.defaults.forEach((r, i) => addRow("default",   "Default",   "rgba(100,200,100,0.85)", r, "all pages",              true,  i));
+    groupArr.forEach((r, i) => addRow(groupKind, groupLabel, groupColour, r, groupScope, true, i));
     (cfg.overrides ?? []).forEach((r, i) => addRow("override",  "Override",  "rgba(100,160,255,0.9)",  r, `page ${this.currentPage}`, true,  i));
     (cfg.exclusions ?? []).forEach((r, i) => addRow("exclusion", "Exclusion", "rgba(224,120,120,0.9)",  r, `page ${this.currentPage}`, false, i));
+    (cfg.tables ?? []).forEach((r, i) => addRow("table",     "Table",     "rgba(167,139,250,0.9)",  r, `page ${this.currentPage}`, false, i));
   }
 
   _renderExceptionsOverview() {
@@ -617,7 +700,7 @@ export class RegionSelector {
 
     const pages = Object.keys(regions.pages)
       .map(Number)
-      .filter(p => (regions.pages[p].overrides?.length || regions.pages[p].exclusions?.length))
+      .filter(p => (regions.pages[p].overrides?.length || regions.pages[p].exclusions?.length || regions.pages[p].tables?.length))
       .sort((a, b) => a - b);
 
     if (!pages.length) {
@@ -639,6 +722,7 @@ export class RegionSelector {
       const parts = [];
       if (cfg.overrides?.length)  parts.push(`${cfg.overrides.length} override${cfg.overrides.length !== 1 ? "s" : ""}`);
       if (cfg.exclusions?.length) parts.push(`${cfg.exclusions.length} exclusion${cfg.exclusions.length !== 1 ? "s" : ""}`);
+      if (cfg.tables?.length)     parts.push(`${cfg.tables.length} table${cfg.tables.length !== 1 ? "s" : ""}`);
       row.innerHTML = `<strong>Page ${p}</strong> <span class="dajb-region-scope">${parts.join(", ")}</span>`;
       root.appendChild(row);
     }
@@ -700,9 +784,9 @@ export class RegionSelector {
     const rule = this.rule;
     if (!rule) return;
     const regions = RuleManager.normalizeRegions(rule);
-    const arr = kind === "default"
-      ? regions.defaults
-      : this._pageCfg(rule, this.currentPage).overrides;
+    const arr = kind === "default"  ? regions.defaults
+              : kind === "defaultB" ? regions.defaultsB
+              : this._pageCfg(rule, this.currentPage).overrides;
     if (from < 0 || from >= arr.length) return;
     if (to > from) to -= 1; // account for removal shift
     if (to === from) return;

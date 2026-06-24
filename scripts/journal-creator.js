@@ -156,9 +156,13 @@ export class JournalCreator {
         preserveFormatting:  tableChild.preserveFormatting  ?? preserveFormatting,
       };
 
-      // ── Auto-detect mode ──────────────────────────────────────────────────────
-      if (tableChild.autoDetect) {
-        const detected = PDFParser.detectTableBoundaries(cleanedItems);
+      // ── Region-tagged / auto-detect mode ──────────────────────────────────────
+      // Import Table Regions takes precedence: marked regions are the sole source
+      // of table locations.  Otherwise fall back to geometric auto-detect.
+      if (tableChild.importTableRegions || tableChild.autoDetect) {
+        const detected = tableChild.importTableRegions
+          ? PDFParser.groupItemsByTableRegion(cleanedItems)
+          : PDFParser.detectTableBoundaries(cleanedItems);
         if (!detected.length) {
           const rawText = cleanedItems.length ? cleanedItems.map(i => i.text).join(' ').trim() : text;
           if (!rawText) return '';

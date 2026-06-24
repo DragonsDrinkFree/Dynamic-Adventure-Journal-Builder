@@ -994,9 +994,13 @@ mark.dajb-match {
   border-radius: 2px;
   display: inline-block;
 }
+.dajb-rtool-alt { font-weight: bold; }
+.dajb-rtool-alt.dajb-active { border-color: #e8b84b; background: #3a3320; color: #ffd66b; }
 .dajb-rtool-default   .dajb-rtool-swatch { background: rgba(100, 200, 100, 0.85); }
+.dajb-rtool-defaultB  .dajb-rtool-swatch { background: rgba(64, 196, 196, 0.9); }
 .dajb-rtool-exclusion .dajb-rtool-swatch { background: rgba(224, 120, 120, 0.9); }
 .dajb-rtool-override  .dajb-rtool-swatch { background: rgba(100, 160, 255, 0.9); }
+.dajb-rtool-table     .dajb-rtool-swatch { background: rgba(167, 139, 250, 0.9); }
 .dajb-rtool-edit      .dajb-rtool-swatch { background: rgba(255, 210, 80, 0.95); }
 
 .dajb-region-nav {
@@ -1016,6 +1020,8 @@ mark.dajb-match {
 }
 .dajb-region-nav button:hover { background: #333; }
 .dajb-region-pagelabel { min-width: 130px; text-align: center; }
+.dajb-region-zoomlabel { min-width: 42px; text-align: center; font-variant-numeric: tabular-nums; }
+.dajb-region-navsep { width: 1px; align-self: stretch; background: #3a3a3a; margin: 0 2px; }
 .dajb-region-pagelabel.dajb-has-exceptions { color: #e8a838; }
 
 /* Tab body: canvas on the left, region side panel on the right. */
