@@ -535,7 +535,6 @@
 
 /* Editor header tints per rule type */
 .dajb-editor-header.strip-header    { border-bottom-color: rgba(224, 120, 120, 0.4); }
-.dajb-editor-header.category-header { border-bottom-color: rgba(126, 200, 227, 0.4); }
 .dajb-editor-header.block-header    { border-bottom-color: rgba(200, 168, 64,  0.4); }
 .dajb-strip-hint { color: #e07878 !important; }
 

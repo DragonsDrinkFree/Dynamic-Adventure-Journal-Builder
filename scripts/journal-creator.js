@@ -37,18 +37,7 @@ export class JournalCreator {
   static async _processTopRule(rule, ruleManager, pdfParser) {
     if (rule.disabled) return;
 
-    // ── create-category: meta rule — just ensure the category exists ──────────
-    if (rule.ruleType === 'create-category') {
-      if (!rule.targetJournal && !rule.name) return;
-      const journal = await JournalCreator._getOrCreateJournal(rule.targetJournal || rule.name);
-      if (rule.targetCategory) {
-        await JournalCreator._ensureCategories(journal, [rule.targetCategory]);
-        console.log(`DAJB | Ensured category "${rule.targetCategory}" in "${journal.name}"`);
-      }
-      return;
-    }
-
-    // ── create-page / create-section: text-processing rules ──────────────────
+    // ── create-page: text-processing rule (auto-creates journal + category) ───
     const ranges = ruleManager.parsePageRanges(rule.pageRanges);
     if (!ranges.length) {
       console.warn(`DAJB | Rule "${rule.name}" has no valid page ranges.`);

@@ -1,3 +1,10 @@
+# v1.1.0
+## Major
+- Implemented PDF region scanning to better select regions
+- Updated table design
+- Auto Catagory Rules implemented.
+- Removed the vestigial "New Catagory" rule type — page rules now create the journal and category automatically. Existing "New Catagory" rules are auto-converted to "New Page" on load.
+
 # v1.0.2
 
 

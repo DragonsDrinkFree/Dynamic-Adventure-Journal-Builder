@@ -13,7 +13,7 @@ export class RuleManager {
     return {
       id: foundry.utils.randomID(),
       name: "New Rule",
-      // "create-category" | "create-page" | "create-section" | "create-collated-section" | "remove-section" | "strip" | "create-table" | "create-format-text"
+      // "create-page" | "create-section" | "create-collated-section" | "remove-section" | "strip" | "create-table" | "create-format-text"
       ruleType: "create-section",
       disabled: false,
       // top-level only
@@ -26,7 +26,7 @@ export class RuleManager {
       // independent of the on-screen render scale.
       regions: { defaults: [], defaultsB: [], pages: {}, alternating: false, overrideTemplates: [] },
       // shared
-      targetCategory: "",   // category to create (create-category) or place content into (create-page)
+      targetCategory: "",   // category to place created pages into (create-page)
       // targeting
       pattern: "",
       flags: "gi",
@@ -79,9 +79,11 @@ export class RuleManager {
     let hasPageRule = false;
     this._walk(this.rules, (r) => { if (r.ruleType === 'create-page') hasPageRule = true; });
     const isTopLevel = parentId === null;
+    // Top-level rules are always pages (they create the journal/category and own
+    // page ranges).  Children default to sections once a page rule exists.
     const defaultType = isTopLevel
-      ? (hasPageRule ? 'create-category' : 'create-page')
-      : (hasPageRule ? 'create-section'  : 'create-page');
+      ? 'create-page'
+      : (hasPageRule ? 'create-section' : 'create-page');
     const rule = this._makeRule({ ruleType: defaultType });
     if (parentId === null) {
       this.rules.push(rule);
@@ -197,6 +199,10 @@ export class RuleManager {
       throw new Error('JSON must have a top-level "rules" array');
     this.rules = data.rules;
     this._walk(this.rules, (rule) => {
+      // Migrate the removed "create-category" type → "create-page". Page rules now
+      // auto-create the journal + target category, so the standalone category rule
+      // is obsolete; converting keeps the rule's journal/category data editable.
+      if (rule.ruleType === 'create-category') rule.ruleType = 'create-page';
       // Ensure the regions container exists and is well-formed on loaded rules.
       RuleManager.normalizeRegions(rule);
       // Ensure font size fields exist (min/max are now intentional advanced fields)

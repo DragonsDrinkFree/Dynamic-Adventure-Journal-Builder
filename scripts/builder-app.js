@@ -141,7 +141,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
   // ── Rules Tree drag & drop ──────────────────────────────────────────────────
 
   /** Allowed top-level rule types; everything else is child-only. */
-  static TOP_LEVEL_TYPES = ["create-category", "create-page"];
+  static TOP_LEVEL_TYPES = ["create-page"];
 
   /**
    * Validate a prospective drop.  `destParentId === null` means top level.
@@ -154,7 +154,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     if (destParentId && this.ruleManager.isDescendant(draggedId, destParentId)) return false;
     const isTopLevel = destParentId === null;
     if (isTopLevel) return BuilderApp.TOP_LEVEL_TYPES.includes(dragged.ruleType);
-    return dragged.ruleType !== "create-category"; // any child type
+    return true; // any rule type may be a child
   }
 
   _clearDropIndicators() {
@@ -298,7 +298,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     label.className = "dajb-rule-label";
     label.dataset.action = "select-rule";
     label.dataset.ruleId = rule.id;
-    const typeInfo = { "create-category": ["cat","#7ec8e3"], "create-page": ["page","#9ade9a"], "strip": ["strip","#e07878"], "create-collated-section": ["collate","#e8a838"], "remove-section": ["remove","#c87878"], "create-table": ["table","#a78bfa"], "create-format-text": ["fmt","#6ee7b7"] };
+    const typeInfo = { "create-page": ["page","#9ade9a"], "strip": ["strip","#e07878"], "create-collated-section": ["collate","#e8a838"], "remove-section": ["remove","#c87878"], "create-table": ["table","#a78bfa"], "create-format-text": ["fmt","#6ee7b7"] };
     const ti = typeInfo[rule.ruleType];
     if (ti) {
       const badge = document.createElement("span");
@@ -384,7 +384,6 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
   _buildEditorHTML(rule, isTopLevel) {
     const fmt = rule.outputFormat;
     const type = rule.ruleType ?? 'create-section';
-    const isCat       = type === 'create-category';
     const isPage      = type === 'create-page';
     const isSection   = type === 'create-section';
     const isCollated  = type === 'create-collated-section';
@@ -392,10 +391,10 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     const isStrip     = type === 'strip';
     const isTable      = type === 'create-table';
     const isFormatText = type === 'create-format-text';
-    const hasTargeting = !isCat && !isFormatText && !isTable;
+    const hasTargeting = !isFormatText && !isTable;
     const hasOutput    = isPage || isSection || isCollated;
 
-    const headerClass = isCat ? 'category-header' : (isStrip || isRemove) ? 'strip-header' : '';
+    const headerClass = (isStrip || isRemove) ? 'strip-header' : '';
     const canHaveChildren = isPage || isSection || isCollated;
 
     const fontTargetingFields = `
@@ -455,7 +454,6 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           <span>Rule Type</span>
           <div class="dajb-rule-type-row">
             <select data-field="ruleType">
-              ${isTopLevel ? `<option value="create-category"          ${isCat      ? "selected" : ""}>New Category</option>` : ""}
               <option value="create-page"             ${isPage     ? "selected" : ""}>New Page</option>
               ${!isTopLevel ? `<option value="create-section"          ${isSection  ? "selected" : ""}>New Section</option>` : ""}
               ${!isTopLevel ? `<option value="create-collated-section" ${isCollated ? "selected" : ""}>New Collated Section</option>` : ""}
@@ -466,7 +464,6 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             </select>
             ${(() => {
               const levelMap = {
-                'create-category': ['top', 'Top Level Only'],
                 'create-page':     ['both', 'Both'],
               };
               const [cls, label] = levelMap[type] ?? ['child', 'Child Only'];
@@ -476,31 +473,22 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         </label>
 
         ${isTopLevel ? `
-        ${!isCat ? `
         <label class="dajb-field">
           <span>Page Ranges</span>
           <input type="text" data-field="pageRanges" value="${this._esc(rule.pageRanges)}" placeholder="e.g. 11-50, 61-70" />
         </label>
-` : ""}
         <label class="dajb-field">
           <span>Target Journal</span>
           <input type="text" data-field="targetJournal" value="${this._esc(rule.targetJournal)}" placeholder="Journal name" />
         </label>
         ` : ""}
 
-        ${isCat ? `
-        <label class="dajb-field">
-          <span>Category Name</span>
-          <input type="text" data-field="targetCategory" value="${this._esc(rule.targetCategory)}" placeholder="Name of category to create" />
-        </label>
-        <em class="dajb-hint" style="color:#7ec8e3;padding:0 4px 8px">Place this rule above any Create Page rules that use this category.</em>
-        ` : ""}
         ${isPage ? `
         <label class="dajb-field">
           <span>Target Category</span>
           <input type="text" data-field="targetCategory" value="${this._esc(rule.targetCategory)}" placeholder="Category to place pages into" />
         </label>
-        <em class="dajb-hint" style="color:#9ade9a;padding:0 4px 8px">The target journal and category are created automatically if they don't exist — a separate New Category rule is optional.</em>
+        <em class="dajb-hint" style="color:#9ade9a;padding:0 4px 8px">The target journal and category are created automatically if they don't already exist.</em>
         ` : ""}
 
         ${isStrip  ? `<em class="dajb-hint dajb-strip-hint">Matched text is removed before boundary rules run.</em>` : ""}
@@ -1292,6 +1280,17 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
   }
 
   static async _onLoadRules(event, target) {
+    // Font targeting is resolved against the loaded PDF's fonts; loading rules
+    // before a PDF can leave font labels drifting from the expected matches.
+    if (!this.pdfParser.totalPages) {
+      await foundry.applications.api.DialogV2.prompt({
+        window: { title: "Load PDF First" },
+        content: "<p>Please load a PDF before loading rules.</p>",
+        ok: { label: "OK" },
+        rejectClose: false,
+      });
+      return;
+    }
     const input = document.createElement("input");
     input.type = "file";
     input.accept = ".json,application/json";
@@ -1481,7 +1480,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     bar.style.top  = `${clientY + 12}px`;
 
     const canAddToCurrent = !!this.selectedRuleId &&
-      this.ruleManager.getRuleById(this.selectedRuleId)?.ruleType !== 'create-category';
+      !!this.ruleManager.getRuleById(this.selectedRuleId);
 
     bar.innerHTML = `
       <div class="dajb-sel-info">
