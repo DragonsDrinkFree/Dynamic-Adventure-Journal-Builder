@@ -429,7 +429,7 @@ export class PDFParser {
     const tagTables = (items, tables) => !tables?.length ? items
       : items.map(it => {
           const t = tables.find(tb => PDFParser._inRect(it, tb));
-          return t ? { ...it, tableRegionId: t.id } : it;
+          return t ? { ...it, tableRegionId: t.id, tableMaxColumns: t.maxColumns } : it;
         });
 
     for (const { start, end } of ranges) {

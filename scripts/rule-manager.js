@@ -24,7 +24,7 @@ export class RuleManager {
       //   pages:    { [pageNum]: { exclusions:[{x,y,w,h}], overrides:[{id,order,x,y,w,h}] } }
       // Coordinates are stored in PDF user units (bottom-left origin), so they are
       // independent of the on-screen render scale.
-      regions: { defaults: [], defaultsB: [], pages: {}, alternating: false },
+      regions: { defaults: [], defaultsB: [], pages: {}, alternating: false, overrideTemplates: [] },
       // shared
       targetCategory: "",   // category to create (create-category) or place content into (create-page)
       // targeting
@@ -247,11 +247,14 @@ export class RuleManager {
     if (!Array.isArray(rule.regions.defaults)) rule.regions.defaults = [];
     if (!Array.isArray(rule.regions.defaultsB)) rule.regions.defaultsB = [];
     if (typeof rule.regions.alternating !== "boolean") rule.regions.alternating = false;
+    if (!Array.isArray(rule.regions.overrideTemplates)) rule.regions.overrideTemplates = [];
     if (!rule.regions.pages || typeof rule.regions.pages !== "object") rule.regions.pages = {};
     for (const cfg of Object.values(rule.regions.pages)) {
       if (!Array.isArray(cfg.exclusions)) cfg.exclusions = [];
       if (!Array.isArray(cfg.overrides))  cfg.overrides  = [];
       if (!Array.isArray(cfg.tables))     cfg.tables     = [];
+      // Each Table Override region carries its own column cap (default 2).
+      for (const t of cfg.tables) { if (t.maxColumns == null) t.maxColumns = 2; }
     }
     return rule.regions;
   }

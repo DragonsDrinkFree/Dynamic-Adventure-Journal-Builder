@@ -117,6 +117,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     if (this._selectionDebounce) { clearTimeout(this._selectionDebounce); this._selectionDebounce = null; }
     if (this._previewRefreshTimer) { clearTimeout(this._previewRefreshTimer); this._previewRefreshTimer = null; }
     if (this._regionRefreshTimer) { clearTimeout(this._regionRefreshTimer); this._regionRefreshTimer = null; }
+    this.regionSelector?._dismissOverrideMenu?.();
     if (typeof super._onClose === "function") super._onClose(options);
   }
 
@@ -391,7 +392,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     const isStrip     = type === 'strip';
     const isTable      = type === 'create-table';
     const isFormatText = type === 'create-format-text';
-    const hasTargeting = !isCat && !isFormatText;
+    const hasTargeting = !isCat && !isFormatText && !isTable;
     const hasOutput    = isPage || isSection || isCollated;
 
     const headerClass = isCat ? 'category-header' : (isStrip || isRemove) ? 'strip-header' : '';
@@ -511,12 +512,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             <input type="checkbox" data-field="importTableRegions" ${rule.importTableRegions ? "checked" : ""} />
             <span>Import Table Regions</span>
           </label>
-          <em class="dajb-hint">Use the Table Override regions drawn on the Select Regions tab as the table locations. When on, this overrides Auto-detect and font/regex targeting.</em>
-          <label class="dajb-field dajb-field-check">
-            <input type="checkbox" data-field="autoDetect" ${rule.autoDetect ? "checked" : ""} />
-            <span>Auto-detect tables</span>
-          </label>
-          <em class="dajb-hint">Scan body items geometrically for numbered tables (d6/d8/numbered rows). Use when the table appears anywhere in the section body without fixed font targeting.</em>
+          <em class="dajb-hint">Use the Table Override regions drawn on the Select Regions tab as the table locations. Each region sets its own column count in the region list. When off, the whole section body is parsed as one table.</em>
           <label class="dajb-field dajb-field-check">
             <input type="checkbox" data-field="firstRowHeader" ${rule.firstRowHeader !== false ? "checked" : ""} />
             <span>First row is header</span>
@@ -528,10 +524,10 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           </label>
           <em class="dajb-hint">Minimum x-gap between text runs to detect a column boundary. Increase if columns are merging; decrease if too many columns appear.</em>
           <label class="dajb-field">
-            <span>Max columns</span>
+            <span>Default max columns</span>
             <input type="number" data-field="maxColumns" value="${rule.maxColumns ?? 0}" min="0" step="1" style="width:70px" />
           </label>
-          <em class="dajb-hint">Cap the number of columns. 0 = auto-detect all. Set to 2 for simple two-column tables (number + description) where gap noise creates phantom columns.</em>
+          <em class="dajb-hint">Fallback column cap for whole-body mode. With Import Table Regions on, each region's own column count (set in the region list) takes over. 0 = auto-detect all.</em>
           <label class="dajb-field">
             <span>Gap noise filter (×median)</span>
             <input type="number" data-field="columnGapMultiplier" value="${rule.columnGapMultiplier ?? 0}" min="0" step="0.5" style="width:70px" />
@@ -704,7 +700,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     if (["pattern", "flags", "pageRanges", "captureGroup", "fontSize", "minFontSize", "maxFontSize",
          "groupName", "breakOnSentence",
          "outputFormat.headingLevel", "outputFormat.additionalFormatting", "outputFormat.paragraphDetection",
-         "firstRowHeader", "columnGapMinPt", "columnGapMultiplier", "maxColumns", "autoDetect", "importTableRegions",
+         "firstRowHeader", "columnGapMinPt", "columnGapMultiplier", "maxColumns", "importTableRegions",
          "formatOptions.bold", "formatOptions.underline", "formatOptions.indent",
          "formatOptions.lineReturnBefore", "formatOptions.lineReturnAfter"].includes(field)) {
       const isTextInput = ["pattern", "flags", "pageRanges", "groupName", "fontSize", "minFontSize", "maxFontSize", "columnGapMinPt", "columnGapMultiplier", "maxColumns"].includes(field);
@@ -841,13 +837,10 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       // too — so a Table Override region that falls inside otherwise-unstructured
       // text still renders as a table instead of greyed-out prose.
       const inhTable = rule?.children?.find(c =>
-        c.ruleType === 'create-table' && !c.disabled && (c.importTableRegions || c.autoDetect)) ?? null;
+        c.ruleType === 'create-table' && !c.disabled && c.importTableRegions) ?? null;
       const inhFormat = rule?.children?.filter(c =>
         c.ruleType === 'create-format-text' && !c.disabled && c.pattern) ?? [];
-      const hasTaggedTable = inhTable && (
-        inhTable.importTableRegions
-          ? items.some(it => it.tableRegionId != null)
-          : PDFParser.detectTableBoundaries(items).length > 0);
+      const hasTaggedTable = inhTable && items.some(it => it.tableRegionId != null);
 
       if (items.length && hasTaggedTable) {
         el.className = "dajb-preview-section depth-" + depth;
@@ -1111,40 +1104,25 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         if (hasItems) el.appendChild(listEl);
       } else if (childRule && childRule.ruleType === 'create-table') {
         // Table mode: geometrically parse body items into an HTML table preview.
-        // If the table rule has targeting, use it to split preamble from table items.
         const tableChild = childRule;
-        const tableOpts = {
-          firstRowHeader:      tableChild.firstRowHeader      ?? true,
-          columnGapMinPt:      tableChild.columnGapMinPt      ?? 4,
-          columnGapMultiplier: tableChild.columnGapMultiplier ?? 0,
-          maxColumns:          tableChild.maxColumns          ?? 0,
-          preserveFormatting:  tableChild.preserveFormatting  ?? false,
-        };
-        if (tableChild.importTableRegions || tableChild.autoDetect) {
+        if (tableChild.importTableRegions) {
+          // Region-driven: each marked region (with its own maxColumns) becomes a table.
           const ftRules = rule.children?.filter(c =>
             c.ruleType === 'create-format-text' && !c.disabled && c.pattern
           ) ?? [];
           this._appendDetectedTables(el, strippedItems, tableChild, ftRules);
           return el; // early return — we've fully rendered the body
         }
-
-        const hasCriteria = !!(tableChild.pattern || tableChild.fontSize != null);
-        let tableItems = strippedItems;
-        if (hasCriteria && strippedItems.length) {
-          const sections = RuleManager.splitOnCombinedTargeting(strippedItems, tableChild);
-          const preamble = sections.find(s => s.match === null);
-          if (preamble?.bodyItems?.length) {
-            const pre = document.createElement('div');
-            pre.className = 'dajb-preview-body-text';
-            this._appendItemSpans(pre, preamble.bodyItems, { limit: 100 });
-            el.appendChild(pre);
-          }
-          tableItems = sections
-            .filter(s => s.match !== null)
-            .flatMap(s => [...(s.titleItems ?? []), ...(s.bodyItems ?? [])]);
-        }
-        if (tableItems.length) {
-          const { html, rowCount, colCount } = PDFParser.parseTableRegion(tableItems, tableOpts);
+        // Whole-body mode: parse the entire section body as one table.
+        if (strippedItems.length) {
+          const tableOpts = {
+            firstRowHeader:      tableChild.firstRowHeader      ?? true,
+            columnGapMinPt:      tableChild.columnGapMinPt      ?? 4,
+            columnGapMultiplier: tableChild.columnGapMultiplier ?? 0,
+            maxColumns:          tableChild.maxColumns          ?? 0,
+            preserveFormatting:  tableChild.preserveFormatting  ?? false,
+          };
+          const { html, rowCount, colCount } = PDFParser.parseTableRegion(strippedItems, tableOpts);
           const wrapper = document.createElement('div');
           wrapper.className = 'dajb-preview-table-wrapper';
           wrapper.innerHTML = html;
@@ -1203,13 +1181,14 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
   }
 
   /**
-   * Render a create-table child's importTableRegions / autoDetect output into `el`,
-   * interleaving detected tables with surrounding prose (top-to-bottom by Y).
+   * Render a create-table child's Import-Table-Regions output into `el`,
+   * interleaving the marked tables with surrounding prose (top-to-bottom by Y).
+   * Each region's own maxColumns overrides the rule default.
    * Shared by the table child branch and the preamble branch (inherited tables).
    * @returns {boolean} true if at least one table was rendered.
    */
   _appendDetectedTables(el, items, tableChild, formatTextRules = []) {
-    if (!(tableChild.importTableRegions || tableChild.autoDetect)) return false;
+    if (!tableChild.importTableRegions) return false;
     const tableOpts = {
       firstRowHeader:      tableChild.firstRowHeader      ?? true,
       columnGapMinPt:      tableChild.columnGapMinPt      ?? 4,
@@ -1217,10 +1196,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       maxColumns:          tableChild.maxColumns          ?? 0,
       preserveFormatting:  tableChild.preserveFormatting  ?? false,
     };
-    const detected = tableChild.importTableRegions
-      ? PDFParser.groupItemsByTableRegion(items)
-      : PDFParser.detectTableBoundaries(items);
-    const detectLabel = tableChild.importTableRegions ? "table region" : "auto-detected";
+    const detected = PDFParser.groupItemsByTableRegion(items);
+    const detectLabel = "table region";
 
     if (!detected.length) {
       const noTbl = document.createElement('div');
@@ -1254,7 +1231,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       proseItems = [];
     };
     const emitTable = (rangeItems) => {
-      const { html: tHtml, rowCount, colCount } = PDFParser.parseTableRegion(rangeItems, tableOpts);
+      const mc = rangeItems[0]?.tableMaxColumns ?? tableOpts.maxColumns;
+      const { html: tHtml, rowCount, colCount } = PDFParser.parseTableRegion(rangeItems, { ...tableOpts, maxColumns: mc });
       const wrapper = document.createElement('div');
       wrapper.className = 'dajb-preview-table-wrapper';
       wrapper.innerHTML = tHtml || '';

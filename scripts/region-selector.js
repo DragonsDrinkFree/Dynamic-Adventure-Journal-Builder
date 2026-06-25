@@ -1,4 +1,5 @@
 import { RuleManager } from "./rule-manager.js";
+import { PDFParser } from "./pdf-parser.js";
 
 /**
  * RegionSelector — drives the "Select Regions" tab.
@@ -70,6 +71,7 @@ export class RegionSelector {
 
   /** Called from BuilderApp._onRender — DOM was rebuilt, so re-attach listeners. */
   onRender() {
+    this._dismissOverrideMenu();
     this._attachListeners();
     this._setupResizeObserver();
     const tab = this.app.element?.querySelector("#dajb-tab-regions");
@@ -136,7 +138,30 @@ export class RegionSelector {
       });
     }
 
-    this._attachListDragDrop(tab.querySelector("#dajb-region-list"));
+    const zoomSel = tab.querySelector(".dajb-region-zoom-select");
+    zoomSel?.addEventListener("change", () => this._setZoom(parseFloat(zoomSel.value)));
+
+    const list = tab.querySelector("#dajb-region-list");
+    this._attachListDragDrop(list);
+
+    // Per-region table column-count edits (delegated; survives innerHTML rebuilds).
+    list?.addEventListener("change", (ev) => {
+      const inp = ev.target.closest(".dajb-region-maxcols");
+      if (inp) this._onMaxColsChange(inp);
+    });
+  }
+
+  _onMaxColsChange(inp) {
+    const rule = this.rule;
+    if (!rule) return;
+    const cfg = this._pageCfg(rule, this.currentPage);
+    const t = cfg.tables.find(x => x.id === inp.dataset.id);
+    if (!t) return;
+    let v = parseInt(inp.value, 10);
+    if (!Number.isFinite(v) || v < 1) v = 1;
+    t.maxColumns = v;
+    inp.value = String(v);
+    this._persist();
   }
 
   _onAction(action, btn) {
@@ -145,7 +170,8 @@ export class RegionSelector {
       case "tool-defaultB":  this._toggleTool("defaultB");  break;
       case "toggle-alternating": this._toggleAlternating(); break;
       case "tool-exclusion": this._toggleTool("exclusion"); break;
-      case "tool-override":  this._toggleTool("override");  break;
+      case "tool-override":  this._openOverrideMenu(btn);   break;
+      case "save-override-template": this._saveOverrideTemplate(); break;
       case "tool-table":     this._toggleTool("table");     break;
       case "tool-edit":      this._toggleTool("edit");      break;
       case "prev-page":      this._stepPage(-1); break;
@@ -153,9 +179,6 @@ export class RegionSelector {
       case "delete-region":  this._deleteRegion(btn); break;
       case "goto-page":      this._gotoPage(Number(btn.dataset.page)); break;
       case "toggle-side":    this._toggleSide(); break;
-      case "zoom-in":        this._setZoom(this.zoom * 1.25); break;
-      case "zoom-out":       this._setZoom(this.zoom / 1.25); break;
-      case "zoom-fit":       this._setZoom(1); break;
     }
   }
 
@@ -296,12 +319,12 @@ export class RegionSelector {
       const marked = (cfg.overrides.length || cfg.exclusions.length || cfg.tables.length) ? " ●" : "";
       const pos = idx >= 0 ? ` (${idx + 1}/${pages.length})` : "";
       const grp = rule.regions?.alternating ? ` [${this._currentPageGroup()}]` : "";
-      label.textContent = `Page ${this.currentPage}${pos}${grp}${marked}`;
+      label.textContent = `p. ${this.currentPage}${pos}${grp}${marked}`;
       label.classList.toggle("dajb-has-exceptions", !!marked);
     }
 
-    const zoomLabel = tab.querySelector(".dajb-region-zoomlabel");
-    if (zoomLabel) zoomLabel.textContent = `${Math.round(this.zoom * 100)}%`;
+    const zoomSel = tab.querySelector(".dajb-region-zoom-select");
+    if (zoomSel) zoomSel.value = String(this.zoom);
 
     this._redrawOverlay();
     this._renderSidePanel();
@@ -540,7 +563,7 @@ export class RegionSelector {
 
   // ── Region creation / deletion ──────────────────────────────────────────────
 
-  _finalizeRegion(canvasRect) {
+  async _finalizeRegion(canvasRect) {
     const rule = this.rule;
     if (!rule) return;
     const pdfRect = this._canvasRectToPdf(canvasRect);
@@ -554,12 +577,25 @@ export class RegionSelector {
       const cfg = this._pageCfg(rule, this.currentPage);
       if (this.tool === "exclusion") cfg.exclusions.push({ ...pdfRect });
       else if (this.tool === "override") cfg.overrides.push({ id: foundry.utils.randomID(), order: cfg.overrides.length, ...pdfRect });
-      else if (this.tool === "table") cfg.tables.push({ id: foundry.utils.randomID(), ...pdfRect });
+      else if (this.tool === "table") cfg.tables.push({ id: foundry.utils.randomID(), maxColumns: await this._detectColumns(pdfRect), ...pdfRect });
     }
 
     this._persist();
     this._redrawOverlay();
     this._renderSidePanel();
+  }
+
+  /** Best-effort column count for a freshly drawn table region (defaults to 2). */
+  async _detectColumns(pdfRect) {
+    try {
+      const pageItems = await this.pdfParser.getPageItems(this.currentPage);
+      const within = PDFParser.filterItemsToRegion(pageItems, pdfRect);
+      if (!within.length) return 2;
+      const { colCount } = PDFParser.parseTableRegion(within, { columnGapMinPt: 4, maxColumns: 0 });
+      return Math.max(1, colCount || 2);
+    } catch (_) {
+      return 2;
+    }
   }
 
   _pageCfg(rule, page) {
@@ -613,6 +649,134 @@ export class RegionSelector {
 
   _renumber(arr) { arr.forEach((r, i) => { r.order = i; }); }
 
+  // ── Override templates ────────────────────────────────────────────────────────
+
+  /** Open the Override-tool dropdown: draw new, or apply/delete a saved template. */
+  _openOverrideMenu(btn) {
+    this._dismissOverrideMenu();
+    const rule = this.rule;
+    const regions = rule ? RuleManager.normalizeRegions(rule) : { overrideTemplates: [] };
+    const templates = regions.overrideTemplates ?? [];
+
+    const menu = document.createElement("div");
+    menu.className = "dajb-region-menu";
+
+    const drawItem = document.createElement("button");
+    drawItem.type = "button";
+    drawItem.className = "dajb-region-menu-item";
+    drawItem.textContent = "✏ Draw new overrides";
+    drawItem.addEventListener("click", () => { this._dismissOverrideMenu(); this._toggleTool("override"); });
+    menu.appendChild(drawItem);
+
+    const divider = document.createElement("div");
+    divider.className = "dajb-region-menu-divider";
+    menu.appendChild(divider);
+
+    if (!templates.length) {
+      const empty = document.createElement("div");
+      empty.className = "dajb-region-menu-empty";
+      empty.textContent = "No saved templates";
+      menu.appendChild(empty);
+    } else {
+      for (const tpl of templates) {
+        // Row = container with two sibling buttons (apply | delete). Avoid nesting
+        // a clickable element inside a <button>, which made the ✕ activate "apply".
+        const row = document.createElement("div");
+        row.className = "dajb-region-menu-row";
+
+        const name = document.createElement("button");
+        name.type = "button";
+        name.className = "dajb-region-menu-item dajb-region-menu-name";
+        name.textContent = `▦ ${tpl.name} (${tpl.overrides?.length ?? 0})`;
+        name.addEventListener("click", () => { this._dismissOverrideMenu(); this._applyOverrideTemplate(tpl.id); });
+        row.appendChild(name);
+
+        const del = document.createElement("button");
+        del.type = "button";
+        del.className = "dajb-region-menu-del";
+        del.textContent = "✕";
+        del.title = "Delete template";
+        del.addEventListener("click", (e) => { e.stopPropagation(); this._deleteOverrideTemplate(tpl.id); this._openOverrideMenu(btn); });
+        row.appendChild(del);
+
+        menu.appendChild(row);
+      }
+    }
+
+    document.body.appendChild(menu);
+    const rect = btn.getBoundingClientRect();
+    menu.style.left = `${rect.left}px`;
+    menu.style.top  = `${rect.bottom + 4}px`;
+    const mrect = menu.getBoundingClientRect();
+    if (mrect.right > window.innerWidth - 8) menu.style.left = `${window.innerWidth - mrect.width - 8}px`;
+
+    this._overrideMenu = menu;
+    this._overrideMenuDismiss = (e) => {
+      if (!menu.contains(e.target) && e.target !== btn && !btn.contains(e.target)) this._dismissOverrideMenu();
+    };
+    setTimeout(() => document.addEventListener("mousedown", this._overrideMenuDismiss), 0);
+  }
+
+  _dismissOverrideMenu() {
+    if (this._overrideMenu) { this._overrideMenu.remove(); this._overrideMenu = null; }
+    if (this._overrideMenuDismiss) { document.removeEventListener("mousedown", this._overrideMenuDismiss); this._overrideMenuDismiss = null; }
+  }
+
+  async _saveOverrideTemplate() {
+    const rule = this.rule;
+    if (!rule) return;
+    const regions = RuleManager.normalizeRegions(rule);
+    const cfg = this._pageCfgRead(rule, this.currentPage);
+    if (!cfg.overrides.length) { ui.notifications?.warn("DAJB | No overrides on this page to save."); return; }
+    const name = await this._promptName("Save Override Template", `Template ${regions.overrideTemplates.length + 1}`);
+    if (!name) return;
+    regions.overrideTemplates.push({
+      id: foundry.utils.randomID(),
+      name,
+      overrides: cfg.overrides.map(o => ({ order: o.order ?? 0, x: o.x, y: o.y, w: o.w, h: o.h })),
+    });
+    this._persist();
+    ui.notifications?.info(`DAJB | Saved override template "${name}".`);
+  }
+
+  _applyOverrideTemplate(id) {
+    const rule = this.rule;
+    if (!rule) return;
+    const regions = RuleManager.normalizeRegions(rule);
+    const tpl = regions.overrideTemplates.find(t => t.id === id);
+    if (!tpl) return;
+    const cfg = this._pageCfg(rule, this.currentPage);
+    const baseOrder = cfg.overrides.length;
+    (tpl.overrides ?? []).forEach((o, i) => {
+      cfg.overrides.push({ id: foundry.utils.randomID(), order: baseOrder + i, x: o.x, y: o.y, w: o.w, h: o.h });
+    });
+    this._persist();
+    this._redrawOverlay();
+    this._renderSidePanel();
+    ui.notifications?.info(`DAJB | Applied template "${tpl.name}".`);
+  }
+
+  _deleteOverrideTemplate(id) {
+    const rule = this.rule;
+    if (!rule) return;
+    const regions = RuleManager.normalizeRegions(rule);
+    regions.overrideTemplates = regions.overrideTemplates.filter(t => t.id !== id);
+    this._persist();
+  }
+
+  async _promptName(title, initial = "") {
+    const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" })[c]);
+    try {
+      const result = await foundry.applications.api.DialogV2.prompt({
+        window: { title },
+        content: `<input type="text" name="tplName" value="${esc(initial)}" style="width:100%" autofocus>`,
+        ok: { label: "Save", callback: (_e, button) => button.form?.elements?.tplName?.value?.trim() || null },
+        rejectClose: false,
+      });
+      return result || null;
+    } catch { return null; }
+  }
+
   // ── Side panel ──────────────────────────────────────────────────────────────
 
   _renderSidePanel() {
@@ -654,6 +818,17 @@ export class RegionSelector {
       text.innerHTML = `<strong>${label}</strong> <span class="dajb-region-scope">${scope}</span><span class="dajb-region-dims">${fmt(r)}</span>`;
       row.appendChild(text);
 
+      // Table regions: inline per-region column count editor.
+      if (kind === "table") {
+        const cols = document.createElement("input");
+        cols.type = "number"; cols.min = "1"; cols.step = "1";
+        cols.className = "dajb-region-maxcols";
+        cols.value = String(r.maxColumns ?? 2);
+        cols.title = "Max columns for this table";
+        if (r.id) cols.dataset.id = r.id;
+        row.appendChild(cols);
+      }
+
       const del = document.createElement("button");
       del.type = "button"; del.className = "dajb-region-del"; del.textContent = "✕"; del.title = "Delete region";
       del.dataset.regionAction = "delete-region";
@@ -682,6 +857,15 @@ export class RegionSelector {
     (cfg.overrides ?? []).forEach((r, i) => addRow("override",  "Override",  "rgba(100,160,255,0.9)",  r, `page ${this.currentPage}`, true,  i));
     (cfg.exclusions ?? []).forEach((r, i) => addRow("exclusion", "Exclusion", "rgba(224,120,120,0.9)",  r, `page ${this.currentPage}`, false, i));
     (cfg.tables ?? []).forEach((r, i) => addRow("table",     "Table",     "rgba(167,139,250,0.9)",  r, `page ${this.currentPage}`, false, i));
+
+    if (cfg.overrides?.length) {
+      const saveBtn = document.createElement("button");
+      saveBtn.type = "button";
+      saveBtn.className = "dajb-region-savetpl";
+      saveBtn.dataset.regionAction = "save-override-template";
+      saveBtn.textContent = "💾 Save overrides as template";
+      list.appendChild(saveBtn);
+    }
   }
 
   _renderExceptionsOverview() {

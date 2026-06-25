@@ -144,8 +144,6 @@ export class JournalCreator {
         : (ownChildren ?? []);
 
     // create-table child: parse body items geometrically into an HTML table.
-    // If the table rule has font/regex targeting, use it to locate where the
-    // table starts — items before the first match are emitted as preamble prose.
     if (tableChild && !primaryChild) {
       if (!cleanedItems.length) return '';
       const tableOpts = {
@@ -156,13 +154,11 @@ export class JournalCreator {
         preserveFormatting:  tableChild.preserveFormatting  ?? preserveFormatting,
       };
 
-      // ── Region-tagged / auto-detect mode ──────────────────────────────────────
-      // Import Table Regions takes precedence: marked regions are the sole source
-      // of table locations.  Otherwise fall back to geometric auto-detect.
-      if (tableChild.importTableRegions || tableChild.autoDetect) {
-        const detected = tableChild.importTableRegions
-          ? PDFParser.groupItemsByTableRegion(cleanedItems)
-          : PDFParser.detectTableBoundaries(cleanedItems);
+      // ── Import Table Regions mode ─────────────────────────────────────────────
+      // Marked regions are the sole source of table locations; each region's own
+      // maxColumns overrides the rule default.
+      if (tableChild.importTableRegions) {
+        const detected = PDFParser.groupItemsByTableRegion(cleanedItems);
         if (!detected.length) {
           const rawText = cleanedItems.length ? cleanedItems.map(i => i.text).join(' ').trim() : text;
           if (!rawText) return '';
@@ -172,14 +168,12 @@ export class JournalCreator {
           return `<p>${formatted}</p>`;
         }
 
-        // Build a Set for fast membership test and compute each table's Y-top
         const inTable = new Set(detected.flat());
         const tableRanges = detected.map(tItems => ({
           yMax:  Math.max(...tItems.map(i => i.y)),
           items: tItems,
         })).sort((a, b) => b.yMax - a.yMax);   // top-to-bottom
 
-        // Walk non-table items top-to-bottom, interleaving table HTML
         const allSorted  = [...cleanedItems].sort((a, b) => b.y - a.y);
         let html         = '';
         let proseItems   = [];
@@ -194,43 +188,24 @@ export class JournalCreator {
           html += `<p>${formatted}</p>`;
           proseItems = [];
         };
+        const emitTable = (grp) => {
+          const mc = grp[0]?.tableMaxColumns ?? tableOpts.maxColumns;
+          const { html: tHtml } = PDFParser.parseTableRegion(grp, { ...tableOpts, maxColumns: mc });
+          if (tHtml) html += tHtml;
+        };
 
         for (const item of allSorted) {
-          // Emit any tables whose top (yMax) is above the current item's Y
           while (ti < tableRanges.length && tableRanges[ti].yMax >= item.y) {
-            flushProse();
-            const { html: tHtml } = PDFParser.parseTableRegion(tableRanges[ti].items, tableOpts);
-            if (tHtml) html += tHtml;
-            ti++;
+            flushProse(); emitTable(tableRanges[ti].items); ti++;
           }
           if (!inTable.has(item)) proseItems.push(item);
         }
-        // Flush any remaining tables (at or below the last prose item)
-        while (ti < tableRanges.length) {
-          flushProse();
-          const { html: tHtml } = PDFParser.parseTableRegion(tableRanges[ti].items, tableOpts);
-          if (tHtml) html += tHtml;
-          ti++;
-        }
+        while (ti < tableRanges.length) { flushProse(); emitTable(tableRanges[ti].items); ti++; }
         flushProse();
         return html;
       }
 
-      // ── Targeted mode (existing logic) ───────────────────────────────────────
-      const hasCriteria = !!(tableChild.pattern || tableChild.fontSize != null ||
-                             tableChild.fontNameContains);
-      if (hasCriteria) {
-        const sections = RuleManager.splitOnCombinedTargeting(cleanedItems, tableChild);
-        let preambleHTML = '';
-        const tableItems = [];
-        for (const sec of sections) {
-          if (sec.match === null) { if (sec.body) preambleHTML += `<p>${sec.body}</p>`; }
-          else { tableItems.push(...(sec.titleItems ?? []), ...(sec.bodyItems ?? [])); }
-        }
-        if (!tableItems.length) return preambleHTML || (text ? `<p>${text}</p>` : '');
-        const { html } = PDFParser.parseTableRegion(tableItems, tableOpts);
-        return preambleHTML + (html || '');
-      }
+      // ── Whole-body mode: parse the entire section body as one table ────────────
       const { html } = PDFParser.parseTableRegion(cleanedItems, tableOpts);
       return html || (text ? `<p>${text}</p>` : '');
     }

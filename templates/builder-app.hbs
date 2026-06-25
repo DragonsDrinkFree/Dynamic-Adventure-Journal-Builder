@@ -83,8 +83,8 @@
             <button type="button" class="dajb-rtool dajb-rtool-exclusion" data-region-action="tool-exclusion" title="Exclusion — carve a section out of the default regions on THIS page only.">
               <span class="dajb-rtool-swatch"></span> Exclusion
             </button>
-            <button type="button" class="dajb-rtool dajb-rtool-override" data-region-action="tool-override" title="Override — ignore the default regions on THIS page and use the regions drawn here instead.">
-              <span class="dajb-rtool-swatch"></span> Override
+            <button type="button" class="dajb-rtool dajb-rtool-override" data-region-action="tool-override" title="Override — ignore the default regions on THIS page. Click for: draw new overrides, or apply a saved override template.">
+              <span class="dajb-rtool-swatch"></span> Override <span class="dajb-rtool-caret">▾</span>
             </button>
             <button type="button" class="dajb-rtool dajb-rtool-table" data-region-action="tool-table" title="Table Override — mark a section of THIS page as a table. Doesn't change the text stream; a Table rule with 'Import Table Regions' uses these to locate tables.">
               <span class="dajb-rtool-swatch"></span> Table
@@ -94,10 +94,12 @@
             </button>
           </div>
           <div class="dajb-region-nav">
-            <button type="button" data-region-action="zoom-out" title="Zoom out">−</button>
-            <span class="dajb-region-zoomlabel" title="Zoom (relative to fit)">100%</span>
-            <button type="button" data-region-action="zoom-in" title="Zoom in">+</button>
-            <button type="button" data-region-action="zoom-fit" title="Fit to width">Fit</button>
+            <select class="dajb-region-zoom-select" title="Zoom (relative to fit width)">
+              <option value="1.25">125%</option>
+              <option value="1" selected>Fit</option>
+              <option value="0.85">85%</option>
+              <option value="0.75">75%</option>
+            </select>
             <span class="dajb-region-navsep"></span>
             <button type="button" data-region-action="prev-page" title="Previous page">◀</button>
             <span class="dajb-region-pagelabel"></span>

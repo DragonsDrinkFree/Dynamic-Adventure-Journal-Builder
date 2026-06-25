@@ -967,8 +967,17 @@ mark.dajb-match {
   background: #1a1a1a;
   border-bottom: 1px solid #3a3a3a;
   flex-shrink: 0;
+  /* When the window is too narrow to show every tool, scroll horizontally
+     instead of clipping the toolbar off-screen. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-wrap: nowrap;
 }
-.dajb-region-tools { display: flex; gap: 4px; }
+.dajb-region-bar::-webkit-scrollbar { height: 6px; }
+.dajb-region-bar::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
+.dajb-region-tools { display: flex; gap: 4px; flex-shrink: 0; }
+.dajb-region-nav   { flex-shrink: 0; }
+.dajb-rtool { flex-shrink: 0; white-space: nowrap; }
 
 .dajb-rtool {
   display: inline-flex;
@@ -1006,7 +1015,7 @@ mark.dajb-match {
 .dajb-region-nav {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   font-size: 11px;
   color: #bbb;
 }
@@ -1016,11 +1025,21 @@ mark.dajb-match {
   border-radius: 3px;
   color: #ccc;
   cursor: pointer;
-  padding: 2px 8px;
+  padding: 1px 5px;
+  font-size: 10px;
+  line-height: 1.2;
 }
 .dajb-region-nav button:hover { background: #333; }
-.dajb-region-pagelabel { min-width: 130px; text-align: center; }
-.dajb-region-zoomlabel { min-width: 42px; text-align: center; font-variant-numeric: tabular-nums; }
+.dajb-region-zoom-select {
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 3px;
+  color: #ccc;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 1px 2px;
+}
+.dajb-region-pagelabel { min-width: 110px; text-align: center; }
 .dajb-region-navsep { width: 1px; align-self: stretch; background: #3a3a3a; margin: 0 2px; }
 .dajb-region-pagelabel.dajb-has-exceptions { color: #e8a838; }
 
@@ -1081,7 +1100,7 @@ mark.dajb-match {
 
 /* Right side panel: sub-tabs + lists */
 .dajb-region-side {
-  width: 250px;
+  width: 208px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -1102,7 +1121,7 @@ mark.dajb-match {
   color: #999;
   font-size: 11px;
   font-weight: bold;
-  padding: 5px 4px;
+  padding: 4px 4px;
   cursor: pointer;
 }
 .dajb-region-subtab:hover { color: #ccc; }
@@ -1113,7 +1132,7 @@ mark.dajb-match {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 4px;
+  padding: 2px;
 }
 .dajb-region-list[hidden],
 .dajb-region-exceptions[hidden] { display: none; }
@@ -1127,9 +1146,9 @@ mark.dajb-match {
 }
 .dajb-region-row {
   display: flex;
-  align-items: flex-start;
-  gap: 5px;
-  padding: 3px 4px;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
   border-bottom: 1px solid #262626;
   font-size: 11px;
   color: #ccc;
@@ -1141,23 +1160,23 @@ mark.dajb-match {
 }
 .dajb-region-row.dajb-dragging { opacity: 0.4; }
 .dajb-region-swatch {
-  width: 11px;
-  height: 11px;
+  width: 10px;
+  height: 10px;
   border-radius: 2px;
   flex-shrink: 0;
-  margin-top: 2px;
 }
 .dajb-region-rowtext {
   flex: 1;
   min-width: 0;
-  line-height: 1.3;
+  line-height: 1.15;
   display: flex;
   flex-direction: column;
 }
-.dajb-region-scope { color: #888; font-size: 10px; }
+.dajb-region-rowtext > strong { font-weight: bold; }
+.dajb-region-scope { color: #888; font-size: 9px; }
 .dajb-region-dims {
   color: #777;
-  font-size: 10px;
+  font-size: 9px;
   font-family: monospace;
 }
 .dajb-region-del {
@@ -1172,6 +1191,80 @@ mark.dajb-match {
   flex-shrink: 0;
 }
 .dajb-region-del:hover { background: #3a2020; }
+
+/* Per-region table column-count input */
+.dajb-region-maxcols {
+  width: 38px;
+  flex-shrink: 0;
+  background: #111;
+  border: 1px solid #444;
+  border-radius: 3px;
+  color: #ddd;
+  font-size: 10px;
+  padding: 1px 3px;
+  text-align: center;
+}
+
+/* Save overrides as template */
+.dajb-region-savetpl {
+  display: block;
+  width: calc(100% - 8px);
+  margin: 6px 4px 2px;
+  background: #1e2e3e;
+  border: 1px solid #2e5c8a;
+  border-radius: 3px;
+  color: #9ecae1;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 4px 6px;
+}
+.dajb-region-savetpl:hover { background: #244e7a; color: #fff; }
+
+/* Override tool dropdown caret */
+.dajb-rtool-caret { font-size: 9px; opacity: 0.7; }
+
+/* Override-tool dropdown menu (floats over the app) */
+.dajb-region-menu {
+  position: fixed;
+  z-index: 10000;
+  min-width: 180px;
+  background: #1e1e1e;
+  border: 1px solid #4a4a4a;
+  border-radius: 4px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6);
+  padding: 4px;
+}
+.dajb-region-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: #ddd;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 8px;
+  text-align: left;
+}
+.dajb-region-menu-item:hover { background: #2e3e50; color: #fff; }
+.dajb-region-menu-divider { height: 1px; background: #3a3a3a; margin: 4px 2px; }
+.dajb-region-menu-empty { color: #777; font-size: 11px; font-style: italic; padding: 4px 8px; }
+.dajb-region-menu-row { display: flex; align-items: stretch; gap: 2px; }
+.dajb-region-menu-row .dajb-region-menu-name { flex: 1; min-width: 0; }
+.dajb-region-menu-del {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: #c87878;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 8px;
+}
+.dajb-region-menu-del:hover { background: #3a2020; color: #ff9a9a; }
 
 /* Exceptions overview */
 .dajb-region-overview-head {
