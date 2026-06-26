@@ -1,6 +1,7 @@
 import { RuleManager } from "./rule-manager.js";
 import { PDFParser } from "./pdf-parser.js";
 import { JournalCreator } from "./journal-creator.js";
+import { RegionSelector } from "./region-selector.js";
 
 const { HandlebarsApplicationMixin, ApplicationV2 } = foundry.applications.api;
 
@@ -29,8 +30,6 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
       "delete-rule":   function(ev, t) { BuilderApp._onDeleteRule.call(this, ev, t); },
       "select-rule":   function(ev, t) { BuilderApp._onSelectRule.call(this, ev, t); },
       "collapse-rule":    function(ev, t) { BuilderApp._onCollapseRule.call(this, ev, t); },
-      "move-rule-up":     function(ev, t) { BuilderApp._onMoveRuleUp.call(this, ev, t); },
-      "move-rule-down":   function(ev, t) { BuilderApp._onMoveRuleDown.call(this, ev, t); },
     },
   };
 
@@ -47,6 +46,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     super(options);
     this.ruleManager = new RuleManager();
     this.pdfParser = new PDFParser();
+    this.regionSelector = new RegionSelector(this);
+    this.activeTab = "preview";
     this.selectedRuleId = null;
     this._pdfFileName = null;
     this._collapsedIds = new Set();
@@ -54,6 +55,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     this._selectionChangeBound = null;
     this._selectionDebounce = null;
     this._previewRefreshTimer = null;
+    this._regionRefreshTimer = null;
+    this._dragDropContainer = null;
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -78,6 +81,27 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     if (typeof super._onRender === "function") super._onRender(context, options);
     this._refreshAllPanels();
     this._setupSelectionListener();
+    this._setupTabs();
+    this.regionSelector.onRender();
+  }
+
+  /** Wire the Live Preview / Select Regions tab switcher. */
+  _setupTabs() {
+    const tabs = this.element.querySelectorAll(".dajb-preview-tab");
+    if (!tabs.length) return;
+    tabs.forEach((btn) => {
+      btn.addEventListener("click", () => this._switchTab(btn.dataset.tab));
+    });
+    this._switchTab(this.activeTab);
+  }
+
+  _switchTab(tab) {
+    this.activeTab = tab;
+    this.element.querySelectorAll(".dajb-preview-tab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.tab === tab));
+    this.element.querySelectorAll(".dajb-tab-content").forEach((c) =>
+      c.hidden = c.dataset.tab !== tab);
+    if (tab === "regions") this.regionSelector.activate();
   }
 
   /** Clean up global listeners and pending timers when the window closes. */
@@ -93,6 +117,9 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     this._dismissSelectionToolbar();
     if (this._selectionDebounce) { clearTimeout(this._selectionDebounce); this._selectionDebounce = null; }
     if (this._previewRefreshTimer) { clearTimeout(this._previewRefreshTimer); this._previewRefreshTimer = null; }
+    if (this._regionRefreshTimer) { clearTimeout(this._regionRefreshTimer); this._regionRefreshTimer = null; }
+    this.regionSelector?._dismissOverrideMenu?.();
+    this._dragDropContainer = null;
     if (typeof super._onClose === "function") super._onClose(options);
   }
 
@@ -110,6 +137,186 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     for (const rule of rules) {
       container.appendChild(this._buildRuleNode(rule, 0, false));
     }
+    this._setupRuleDragDrop(container);
+  }
+
+  // ── Rules Tree drag & drop ──────────────────────────────────────────────────
+
+  /** Allowed top-level rule types; everything else is child-only. */
+  static TOP_LEVEL_TYPES = ["create-page"];
+
+  /** ruleType → [short label, color] for type chips in the tree and preview badges. */
+  static RULE_TYPE_INFO = {
+    "create-page":             ["page",    "#9ade9a"],
+    "create-section":          ["section", "#9ecae1"],
+    "create-collated-section": ["collate", "#e8a838"],
+    "remove-section":          ["remove",  "#c87878"],
+    "create-table":            ["table",   "#a78bfa"],
+    "create-format-text":      ["fmt",     "#6ee7b7"],
+    "strip":                   ["strip",   "#e07878"],
+  };
+
+  /**
+   * Build a small "rule name + type chip" badge for a preview entry header, so the
+   * user can trace a generated block back to the rule that produced it.
+   * Returns null when there's no usable rule.
+   */
+  _buildRuleBadge(rule) {
+    if (!rule?.ruleType) return null;
+    const info = BuilderApp.RULE_TYPE_INFO[rule.ruleType] ?? [rule.ruleType, "#888"];
+    const badge = document.createElement("span");
+    badge.className = "dajb-preview-rule-badge";
+    badge.title = `Rule: ${rule.name || "(unnamed)"} — ${info[0]}`;
+
+    const chip = document.createElement("span");
+    chip.className = "dajb-preview-rule-badge-type";
+    chip.style.color = info[1];
+    chip.style.borderColor = info[1];
+    chip.textContent = info[0];
+    badge.appendChild(chip);
+
+    if (rule.name) {
+      const nm = document.createElement("span");
+      nm.className = "dajb-preview-rule-badge-name";
+      nm.textContent = rule.name;
+      badge.appendChild(nm);
+    }
+    return badge;
+  }
+
+  /**
+   * Validate a prospective drop.  `destParentId === null` means top level.
+   * Returns true when the dragged rule's type is allowed at the destination level
+   * and the move would not create a cycle.
+   */
+  _canDropRule(draggedId, destParentId) {
+    const dragged = this.ruleManager.getRuleById(draggedId);
+    if (!dragged) return false;
+    if (destParentId && this.ruleManager.isDescendant(draggedId, destParentId)) return false;
+    const isTopLevel = destParentId === null;
+    if (isTopLevel) return BuilderApp.TOP_LEVEL_TYPES.includes(dragged.ruleType);
+    return true; // any rule type may be a child
+  }
+
+  _clearDropIndicators() {
+    this.element?.querySelectorAll(".dajb-drop-before, .dajb-drop-after, .dajb-drop-child")
+      .forEach((el) => el.classList.remove("dajb-drop-before", "dajb-drop-after", "dajb-drop-child"));
+  }
+
+  /**
+   * Resolve the drop target under the cursor into a concrete destination.
+   * Returns { parentId, index, zone, item } or null when the drop is invalid.
+   */
+  _resolveDropTarget(ev) {
+    const item = ev.target.closest(".dajb-rule-item");
+    const tree = this.element.querySelector("#dajb-rules-tree");
+
+    // Dropping onto empty tree space → append at top level.
+    if (!item) {
+      if (!this._canDropRule(this._dragRuleId, null)) return null;
+      return { parentId: null, index: null, zone: "after", item: null };
+    }
+
+    const targetId = item.dataset.ruleId;
+    if (targetId === this._dragRuleId) return null;
+
+    const rect = item.getBoundingClientRect();
+    const rel = (ev.clientY - rect.top) / rect.height;
+    const path = this.ruleManager.getPathToRule(targetId);
+    const targetParentId = path.length > 1 ? path[path.length - 2].id : null;
+
+    let zone;
+    if (rel < 0.25) zone = "before";
+    else if (rel > 0.75) zone = "after";
+    else zone = "child";
+
+    if (zone === "child") {
+      if (!this._canDropRule(this._dragRuleId, targetId)) return null;
+      return { parentId: targetId, index: null, zone, item };
+    }
+
+    // Sibling of the target — same parent/level.
+    if (!this._canDropRule(this._dragRuleId, targetParentId)) return null;
+    const siblings = targetParentId === null
+      ? this.ruleManager.getTopLevelRules()
+      : this.ruleManager.getRuleById(targetParentId).children;
+    let index = siblings.findIndex((r) => r.id === targetId);
+    if (zone === "after") index += 1;
+    return { parentId: targetParentId, index, zone, item };
+  }
+
+  _setupRuleDragDrop(container) {
+    // Listeners are delegated (via ev.target.closest), so they keep working after the
+    // tree's innerHTML is rebuilt — there's no need to re-bind on every _renderRulesTree().
+    // Bind once per container element; re-binding would stack duplicate dragover/drop
+    // handlers that never get removed, progressively slowing drags over a long session.
+    // A genuine Foundry full re-render creates a new #dajb-rules-tree element, so we
+    // compare identity rather than using a boolean flag and still bind the fresh one.
+    if (this._dragDropContainer === container) return;
+    this._dragDropContainer = container;
+
+    container.addEventListener("dragstart", (ev) => {
+      const item = ev.target.closest(".dajb-rule-item");
+      if (!item) return;
+      this._dragRuleId = item.dataset.ruleId;
+      ev.dataTransfer.effectAllowed = "move";
+      ev.dataTransfer.setData("text/plain", this._dragRuleId);
+      item.classList.add("dajb-dragging");
+    });
+
+    container.addEventListener("dragover", (ev) => {
+      if (!this._dragRuleId) return;
+      ev.preventDefault();
+      this._clearDropIndicators();
+      const target = this._resolveDropTarget(ev);
+      if (!target) { ev.dataTransfer.dropEffect = "none"; return; }
+      ev.dataTransfer.dropEffect = "move";
+      if (target.item) {
+        const cls = target.zone === "before" ? "dajb-drop-before"
+                  : target.zone === "after"  ? "dajb-drop-after"
+                  : "dajb-drop-child";
+        target.item.classList.add(cls);
+      }
+    });
+
+    container.addEventListener("drop", (ev) => {
+      if (!this._dragRuleId) return;
+      ev.preventDefault();
+      const target = this._resolveDropTarget(ev);
+      this._clearDropIndicators();
+      if (target) {
+        try {
+          // moveRule removes the rule before inserting, so a downward move within
+          // the same container needs its index decremented by one.
+          let index = target.index;
+          if (index != null) {
+            const path = this.ruleManager.getPathToRule(this._dragRuleId);
+            const srcParentId = path.length > 1 ? path[path.length - 2].id : null;
+            if (srcParentId === target.parentId) {
+              const siblings = target.parentId === null
+                ? this.ruleManager.getTopLevelRules()
+                : this.ruleManager.getRuleById(target.parentId).children;
+              const srcIndex = siblings.findIndex((r) => r.id === this._dragRuleId);
+              if (srcIndex !== -1 && srcIndex < index) index -= 1;
+            }
+          }
+          this.ruleManager.moveRule(this._dragRuleId, target.parentId, index);
+          if (target.zone === "child" && target.parentId) this._collapsedIds.delete(target.parentId);
+        } catch (e) {
+          console.warn("DAJB | Move failed:", e.message);
+        }
+        this._renderRulesTree();
+        this._schedulePreviewRefresh(true);
+      }
+      this._dragRuleId = null;
+    });
+
+    const cleanup = () => { this._clearDropIndicators(); this._dragRuleId = null;
+      container.querySelectorAll(".dajb-dragging").forEach(el => el.classList.remove("dajb-dragging")); };
+    container.addEventListener("dragend", cleanup);
+    container.addEventListener("dragleave", (ev) => {
+      if (!container.contains(ev.relatedTarget)) this._clearDropIndicators();
+    });
   }
 
   _buildRuleNode(rule, depth, parentDisabled = false) {
@@ -141,8 +348,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     label.className = "dajb-rule-label";
     label.dataset.action = "select-rule";
     label.dataset.ruleId = rule.id;
-    const typeInfo = { "create-category": ["cat","#7ec8e3"], "create-page": ["page","#9ade9a"], "strip": ["strip","#e07878"], "create-collated-section": ["collate","#e8a838"], "remove-section": ["remove","#c87878"], "create-table": ["table","#a78bfa"], "create-format-text": ["fmt","#6ee7b7"] };
-    const ti = typeInfo[rule.ruleType];
+    const ti = BuilderApp.RULE_TYPE_INFO[rule.ruleType];
     if (ti) {
       const badge = document.createElement("span");
       badge.className = "dajb-type-badge";
@@ -172,18 +378,14 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     const effectivelyDisabled = rule.disabled || parentDisabled;
     if (effectivelyDisabled) item.classList.add("dajb-disabled");
 
-    // Order buttons
-    const orderBtns = document.createElement("span");
-    orderBtns.className = "dajb-rule-order";
-    const btnUp = document.createElement("button");
-    btnUp.type = "button"; btnUp.textContent = "▲"; btnUp.title = "Move up";
-    btnUp.dataset.action = "move-rule-up"; btnUp.dataset.ruleId = rule.id;
-    const btnDown = document.createElement("button");
-    btnDown.type = "button"; btnDown.textContent = "▼"; btnDown.title = "Move down";
-    btnDown.dataset.action = "move-rule-down"; btnDown.dataset.ruleId = rule.id;
-    orderBtns.appendChild(btnUp);
-    orderBtns.appendChild(btnDown);
-    item.appendChild(orderBtns);
+    // Drag handle / draggable item (reorder + reparent via drag-and-drop)
+    item.draggable = true;
+    item.dataset.depth = String(depth);
+    const grip = document.createElement("span");
+    grip.className = "dajb-rule-grip";
+    grip.textContent = "⠿";
+    grip.title = "Drag to reorder or reparent";
+    item.appendChild(grip);
 
     const wrapper = document.createElement("div");
     wrapper.appendChild(item);
@@ -231,7 +433,6 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
   _buildEditorHTML(rule, isTopLevel) {
     const fmt = rule.outputFormat;
     const type = rule.ruleType ?? 'create-section';
-    const isCat       = type === 'create-category';
     const isPage      = type === 'create-page';
     const isSection   = type === 'create-section';
     const isCollated  = type === 'create-collated-section';
@@ -239,10 +440,10 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     const isStrip     = type === 'strip';
     const isTable      = type === 'create-table';
     const isFormatText = type === 'create-format-text';
-    const hasTargeting = !isCat && !isFormatText;
+    const hasTargeting = !isFormatText && !isTable;
     const hasOutput    = isPage || isSection || isCollated;
 
-    const headerClass = isCat ? 'category-header' : (isStrip || isRemove) ? 'strip-header' : '';
+    const headerClass = (isStrip || isRemove) ? 'strip-header' : '';
     const canHaveChildren = isPage || isSection || isCollated;
 
     const fontTargetingFields = `
@@ -302,7 +503,6 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           <span>Rule Type</span>
           <div class="dajb-rule-type-row">
             <select data-field="ruleType">
-              ${isTopLevel ? `<option value="create-category"          ${isCat      ? "selected" : ""}>New Category</option>` : ""}
               <option value="create-page"             ${isPage     ? "selected" : ""}>New Page</option>
               ${!isTopLevel ? `<option value="create-section"          ${isSection  ? "selected" : ""}>New Section</option>` : ""}
               ${!isTopLevel ? `<option value="create-collated-section" ${isCollated ? "selected" : ""}>New Collated Section</option>` : ""}
@@ -313,7 +513,6 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             </select>
             ${(() => {
               const levelMap = {
-                'create-category': ['top', 'Top Level Only'],
                 'create-page':     ['both', 'Both'],
               };
               const [cls, label] = levelMap[type] ?? ['child', 'Child Only'];
@@ -323,30 +522,22 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         </label>
 
         ${isTopLevel ? `
-        ${!isCat ? `
         <label class="dajb-field">
           <span>Page Ranges</span>
           <input type="text" data-field="pageRanges" value="${this._esc(rule.pageRanges)}" placeholder="e.g. 11-50, 61-70" />
         </label>
-` : ""}
         <label class="dajb-field">
           <span>Target Journal</span>
           <input type="text" data-field="targetJournal" value="${this._esc(rule.targetJournal)}" placeholder="Journal name" />
         </label>
         ` : ""}
 
-        ${isCat ? `
-        <label class="dajb-field">
-          <span>Category Name</span>
-          <input type="text" data-field="targetCategory" value="${this._esc(rule.targetCategory)}" placeholder="Name of category to create" />
-        </label>
-        <em class="dajb-hint" style="color:#7ec8e3;padding:0 4px 8px">Place this rule above any Create Page rules that use this category.</em>
-        ` : ""}
         ${isPage ? `
         <label class="dajb-field">
           <span>Target Category</span>
           <input type="text" data-field="targetCategory" value="${this._esc(rule.targetCategory)}" placeholder="Category to place pages into" />
         </label>
+        <em class="dajb-hint" style="color:#9ade9a;padding:0 4px 8px">The target journal and category are created automatically if they don't already exist.</em>
         ` : ""}
 
         ${isStrip  ? `<em class="dajb-hint dajb-strip-hint">Matched text is removed before boundary rules run.</em>` : ""}
@@ -355,10 +546,10 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         <fieldset class="dajb-fieldset">
           <legend>Table Options</legend>
           <label class="dajb-field dajb-field-check">
-            <input type="checkbox" data-field="autoDetect" ${rule.autoDetect ? "checked" : ""} />
-            <span>Auto-detect tables</span>
+            <input type="checkbox" data-field="importTableRegions" ${rule.importTableRegions ? "checked" : ""} />
+            <span>Import Table Regions</span>
           </label>
-          <em class="dajb-hint">Scan body items geometrically for numbered tables (d6/d8/numbered rows). Use when the table appears anywhere in the section body without fixed font targeting.</em>
+          <em class="dajb-hint">Use the Table Override regions drawn on the Select Regions tab as the table locations. Each region sets its own column count in the region list. When off, the whole section body is parsed as one table.</em>
           <label class="dajb-field dajb-field-check">
             <input type="checkbox" data-field="firstRowHeader" ${rule.firstRowHeader !== false ? "checked" : ""} />
             <span>First row is header</span>
@@ -370,10 +561,10 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
           </label>
           <em class="dajb-hint">Minimum x-gap between text runs to detect a column boundary. Increase if columns are merging; decrease if too many columns appear.</em>
           <label class="dajb-field">
-            <span>Max columns</span>
+            <span>Default max columns</span>
             <input type="number" data-field="maxColumns" value="${rule.maxColumns ?? 0}" min="0" step="1" style="width:70px" />
           </label>
-          <em class="dajb-hint">Cap the number of columns. 0 = auto-detect all. Set to 2 for simple two-column tables (number + description) where gap noise creates phantom columns.</em>
+          <em class="dajb-hint">Fallback column cap for whole-body mode. With Import Table Regions on, each region's own column count (set in the region list) takes over. 0 = auto-detect all.</em>
           <label class="dajb-field">
             <span>Gap noise filter (×median)</span>
             <input type="number" data-field="columnGapMultiplier" value="${rule.columnGapMultiplier ?? 0}" min="0" step="0.5" style="width:70px" />
@@ -546,12 +737,19 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     if (["pattern", "flags", "pageRanges", "captureGroup", "fontSize", "minFontSize", "maxFontSize",
          "groupName", "breakOnSentence",
          "outputFormat.headingLevel", "outputFormat.additionalFormatting", "outputFormat.paragraphDetection",
-         "firstRowHeader", "columnGapMinPt", "columnGapMultiplier", "maxColumns", "autoDetect",
+         "firstRowHeader", "columnGapMinPt", "columnGapMultiplier", "maxColumns", "importTableRegions",
          "formatOptions.bold", "formatOptions.underline", "formatOptions.indent",
          "formatOptions.lineReturnBefore", "formatOptions.lineReturnAfter"].includes(field)) {
       const isTextInput = ["pattern", "flags", "pageRanges", "groupName", "fontSize", "minFontSize", "maxFontSize", "columnGapMinPt", "columnGapMultiplier", "maxColumns"].includes(field);
       const isFontSizeRange = field === "minFontSize" || field === "maxFontSize";
       this._schedulePreviewRefresh(!isTextInput, isFontSizeRange ? 4000 : undefined);
+    }
+
+    // Page-range changes alter the Select Regions page list — refresh that tab too
+    // (debounced so typing a range doesn't re-render the PDF on every keystroke).
+    if (field === "pageRanges" && this.activeTab === "regions") {
+      clearTimeout(this._regionRefreshTimer);
+      this._regionRefreshTimer = setTimeout(() => this.regionSelector.activate(), 600);
     }
   }
 
@@ -624,7 +822,9 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         return;
       }
 
-      const items = await this.pdfParser.getPagesItems(ranges, {});
+      const items = RuleManager.hasRegions(topRule)
+        ? await this.pdfParser.getPagesItemsForRegions(ranges, topRule.regions)
+        : await this.pdfParser.getPagesItems(ranges, {});
       const sections = RuleManager.splitOnCombinedTargeting(items, topRule);
       const named = sections.filter(s => s.match);
 
@@ -668,6 +868,29 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     const el = document.createElement("div");
 
     if (sec.match === null) {
+      const items = sec.bodyItems ?? [];
+
+      // Inherited table / format-text rules apply to unmatched (preamble) content
+      // too — so a Table Override region that falls inside otherwise-unstructured
+      // text still renders as a table instead of greyed-out prose.
+      const inhTable = rule?.children?.find(c =>
+        c.ruleType === 'create-table' && !c.disabled && c.importTableRegions) ?? null;
+      const inhFormat = rule?.children?.filter(c =>
+        c.ruleType === 'create-format-text' && !c.disabled && c.pattern) ?? [];
+      const hasTaggedTable = inhTable && items.some(it => it.tableRegionId != null);
+
+      if (items.length && hasTaggedTable) {
+        el.className = "dajb-preview-section depth-" + depth;
+        this._appendDetectedTables(el, items, inhTable, inhFormat);
+        return el;
+      }
+      if (items.length && inhFormat.length) {
+        el.className = "dajb-preview-body-text";
+        const rawText = items.map(i => i.text).join(' ').trim();
+        el.innerHTML = `<p>${JournalCreator._applyFormatTextRules(rawText, inhFormat)}</p>`;
+        return el;
+      }
+
       // Preamble text — shown greyed out, rendered as item spans for selectability
       el.className = "dajb-preview-preamble";
       if (sec.bodyItems?.length) {
@@ -700,6 +923,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     // Section title — render as selectable item spans when underlying items are available
     const titleEl = document.createElement("div");
     titleEl.className = "dajb-preview-section-title";
+    const titleContent = document.createElement("span");
+    titleContent.className = "dajb-preview-title-text";
     if (sec.titleItems?.length) {
       for (const item of sec.titleItems) {
         const span = document.createElement("span");
@@ -710,12 +935,15 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         span.dataset.color    = item.color;
         span.dataset.isBold   = item.isBold;
         span.dataset.isItalic = item.isItalic;
-        titleEl.appendChild(span);
-        titleEl.appendChild(document.createTextNode(" "));
+        titleContent.appendChild(span);
+        titleContent.appendChild(document.createTextNode(" "));
       }
     } else {
-      titleEl.textContent = sec.title;
+      titleContent.textContent = sec.title;
     }
+    titleEl.appendChild(titleContent);
+    const titleBadge = this._buildRuleBadge(rule);
+    if (titleBadge) titleEl.appendChild(titleBadge);
     el.appendChild(titleEl);
 
     if (sec.bodyItems?.length || sec.body) {
@@ -767,6 +995,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
               const hdr = document.createElement(`h${level}`);
               hdr.className = 'dajb-preview-collate-heading';
               hdr.textContent = cr.groupName;
+              const b = this._buildRuleBadge(cr);
+              if (b) hdr.appendChild(b);
               groupEl.appendChild(hdr);
             }
             const hasGC = cr.children?.some(c => c.ruleType !== 'strip');
@@ -840,6 +1070,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             const hdr = document.createElement(`h${level}`);
             hdr.className = 'dajb-preview-collate-heading';
             hdr.textContent = childRule.groupName;
+            const b = this._buildRuleBadge(childRule);
+            if (b) hdr.appendChild(b);
             groupEl.appendChild(hdr);
           }
           if (hasGrandchildren) {
@@ -918,103 +1150,25 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         if (hasItems) el.appendChild(listEl);
       } else if (childRule && childRule.ruleType === 'create-table') {
         // Table mode: geometrically parse body items into an HTML table preview.
-        // If the table rule has targeting, use it to split preamble from table items.
         const tableChild = childRule;
-        const tableOpts = {
-          firstRowHeader:      tableChild.firstRowHeader      ?? true,
-          columnGapMinPt:      tableChild.columnGapMinPt      ?? 4,
-          columnGapMultiplier: tableChild.columnGapMultiplier ?? 0,
-          maxColumns:          tableChild.maxColumns          ?? 0,
-          preserveFormatting:  tableChild.preserveFormatting  ?? false,
-        };
-        if (tableChild.autoDetect) {
-          const detected = PDFParser.detectTableBoundaries(strippedItems);
-          if (!detected.length) {
-            const ftRules = rule.children?.filter(c =>
-              c.ruleType === 'create-format-text' && !c.disabled && c.pattern
-            ) ?? [];
-            const noTbl = document.createElement('div');
-            noTbl.className = 'dajb-preview-body-text';
-            if (ftRules.length && strippedItems.length) {
-              const rawText = strippedItems.map(i => i.text).join(' ').trim();
-              noTbl.innerHTML = `<p>${JournalCreator._applyFormatTextRules(rawText, ftRules)}</p>`;
-            } else {
-              this._appendItemSpans(noTbl, strippedItems, { limit: 100 });
-            }
-            el.appendChild(noTbl);
-          } else {
-            const inTable = new Set(detected.flat());
-            const tableRanges = detected.map(tItems => ({
-              yMax: Math.max(...tItems.map(i => i.y)),
-              items: tItems,
-            })).sort((a, b) => b.yMax - a.yMax);
-
-            const allSorted = [...strippedItems].sort((a, b) => b.y - a.y);
-            let ti = 0;
-            let proseItems = [];
-
-            const flushProse = () => {
-              if (!proseItems.length) return;
-              const p = document.createElement('div');
-              p.className = 'dajb-preview-body-text';
-              this._appendItemSpans(p, proseItems, { limit: 60 });
-              el.appendChild(p);
-              proseItems = [];
-            };
-
-            for (const item of allSorted) {
-              while (ti < tableRanges.length && tableRanges[ti].yMax >= item.y) {
-                flushProse();
-                const { html: tHtml, rowCount, colCount } =
-                  PDFParser.parseTableRegion(tableRanges[ti].items, tableOpts);
-                const wrapper = document.createElement('div');
-                wrapper.className = 'dajb-preview-table-wrapper';
-                wrapper.innerHTML = tHtml || '';
-                const badge = document.createElement('div');
-                badge.className = 'dajb-preview-table-badge';
-                badge.textContent = `${rowCount} rows × ${colCount} col${colCount !== 1 ? 's' : ''} (auto-detected)`;
-                wrapper.appendChild(badge);
-                el.appendChild(wrapper);
-                ti++;
-              }
-              if (!inTable.has(item)) proseItems.push(item);
-            }
-            while (ti < tableRanges.length) {
-              flushProse();
-              const { html: tHtml, rowCount, colCount } =
-                PDFParser.parseTableRegion(tableRanges[ti].items, tableOpts);
-              const wrapper = document.createElement('div');
-              wrapper.className = 'dajb-preview-table-wrapper';
-              wrapper.innerHTML = tHtml || '';
-              const badge = document.createElement('div');
-              badge.className = 'dajb-preview-table-badge';
-              badge.textContent = `${rowCount} rows × ${colCount} col${colCount !== 1 ? 's' : ''} (auto-detected)`;
-              wrapper.appendChild(badge);
-              el.appendChild(wrapper);
-              ti++;
-            }
-            flushProse();
-          }
+        if (tableChild.importTableRegions) {
+          // Region-driven: each marked region (with its own maxColumns) becomes a table.
+          const ftRules = rule.children?.filter(c =>
+            c.ruleType === 'create-format-text' && !c.disabled && c.pattern
+          ) ?? [];
+          this._appendDetectedTables(el, strippedItems, tableChild, ftRules);
           return el; // early return — we've fully rendered the body
         }
-
-        const hasCriteria = !!(tableChild.pattern || tableChild.fontSize != null);
-        let tableItems = strippedItems;
-        if (hasCriteria && strippedItems.length) {
-          const sections = RuleManager.splitOnCombinedTargeting(strippedItems, tableChild);
-          const preamble = sections.find(s => s.match === null);
-          if (preamble?.bodyItems?.length) {
-            const pre = document.createElement('div');
-            pre.className = 'dajb-preview-body-text';
-            this._appendItemSpans(pre, preamble.bodyItems, { limit: 100 });
-            el.appendChild(pre);
-          }
-          tableItems = sections
-            .filter(s => s.match !== null)
-            .flatMap(s => [...(s.titleItems ?? []), ...(s.bodyItems ?? [])]);
-        }
-        if (tableItems.length) {
-          const { html, rowCount, colCount } = PDFParser.parseTableRegion(tableItems, tableOpts);
+        // Whole-body mode: parse the entire section body as one table.
+        if (strippedItems.length) {
+          const tableOpts = {
+            firstRowHeader:      tableChild.firstRowHeader      ?? true,
+            columnGapMinPt:      tableChild.columnGapMinPt      ?? 4,
+            columnGapMultiplier: tableChild.columnGapMultiplier ?? 0,
+            maxColumns:          tableChild.maxColumns          ?? 0,
+            preserveFormatting:  tableChild.preserveFormatting  ?? false,
+          };
+          const { html, rowCount, colCount } = PDFParser.parseTableRegion(strippedItems, tableOpts);
           const wrapper = document.createElement('div');
           wrapper.className = 'dajb-preview-table-wrapper';
           wrapper.innerHTML = html;
@@ -1072,6 +1226,78 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     return el;
   }
 
+  /**
+   * Render a create-table child's Import-Table-Regions output into `el`,
+   * interleaving the marked tables with surrounding prose (top-to-bottom by Y).
+   * Each region's own maxColumns overrides the rule default.
+   * Shared by the table child branch and the preamble branch (inherited tables).
+   * @returns {boolean} true if at least one table was rendered.
+   */
+  _appendDetectedTables(el, items, tableChild, formatTextRules = []) {
+    if (!tableChild.importTableRegions) return false;
+    const tableOpts = {
+      firstRowHeader:      tableChild.firstRowHeader      ?? true,
+      columnGapMinPt:      tableChild.columnGapMinPt      ?? 4,
+      columnGapMultiplier: tableChild.columnGapMultiplier ?? 0,
+      maxColumns:          tableChild.maxColumns          ?? 0,
+      preserveFormatting:  tableChild.preserveFormatting  ?? false,
+    };
+    const detected = PDFParser.groupItemsByTableRegion(items);
+    const detectLabel = "table region";
+
+    if (!detected.length) {
+      const noTbl = document.createElement('div');
+      noTbl.className = 'dajb-preview-body-text';
+      if (formatTextRules.length && items.length) {
+        const rawText = items.map(i => i.text).join(' ').trim();
+        noTbl.innerHTML = `<p>${JournalCreator._applyFormatTextRules(rawText, formatTextRules)}</p>`;
+      } else {
+        this._appendItemSpans(noTbl, items, { limit: 100 });
+      }
+      el.appendChild(noTbl);
+      return false;
+    }
+
+    const inTable = new Set(detected.flat());
+    const tableRanges = detected.map(tItems => ({
+      yMax: Math.max(...tItems.map(i => i.y)),
+      items: tItems,
+    })).sort((a, b) => b.yMax - a.yMax);
+
+    const allSorted = [...items].sort((a, b) => b.y - a.y);
+    let ti = 0;
+    let proseItems = [];
+
+    const flushProse = () => {
+      if (!proseItems.length) return;
+      const p = document.createElement('div');
+      p.className = 'dajb-preview-body-text';
+      this._appendItemSpans(p, proseItems, { limit: 60 });
+      el.appendChild(p);
+      proseItems = [];
+    };
+    const emitTable = (rangeItems) => {
+      const mc = rangeItems[0]?.tableMaxColumns ?? tableOpts.maxColumns;
+      const { html: tHtml, rowCount, colCount } = PDFParser.parseTableRegion(rangeItems, { ...tableOpts, maxColumns: mc });
+      const wrapper = document.createElement('div');
+      wrapper.className = 'dajb-preview-table-wrapper';
+      wrapper.innerHTML = tHtml || '';
+      const badge = document.createElement('div');
+      badge.className = 'dajb-preview-table-badge';
+      badge.textContent = `${rowCount} rows × ${colCount} col${colCount !== 1 ? 's' : ''} (${detectLabel})`;
+      wrapper.appendChild(badge);
+      el.appendChild(wrapper);
+    };
+
+    for (const item of allSorted) {
+      while (ti < tableRanges.length && tableRanges[ti].yMax >= item.y) { flushProse(); emitTable(tableRanges[ti].items); ti++; }
+      if (!inTable.has(item)) proseItems.push(item);
+    }
+    while (ti < tableRanges.length) { flushProse(); emitTable(tableRanges[ti].items); ti++; }
+    flushProse();
+    return true;
+  }
+
   /** Get text for a rule, applying font criteria as a pre-filter when paired with a regex. */
   async _getTextForRule(rule, ranges) {
     const hasFontFilter = rule.fontSize != null;
@@ -1102,6 +1328,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         if (loadBtn) loadBtn.textContent = "Change PDF";
         ui.notifications.info(`DAJB | Loaded: ${file.name}`);
         this._renderPreview();
+        if (this.activeTab === "regions") this.regionSelector.activate();
       } catch (e) {
         ui.notifications.error(`DAJB | Failed to load PDF: ${e.message}`);
         console.error(e);
@@ -1111,6 +1338,17 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
   }
 
   static async _onLoadRules(event, target) {
+    // Font targeting is resolved against the loaded PDF's fonts; loading rules
+    // before a PDF can leave font labels drifting from the expected matches.
+    if (!this.pdfParser.totalPages) {
+      await foundry.applications.api.DialogV2.prompt({
+        window: { title: "Load PDF First" },
+        content: "<p>Please load a PDF before loading rules.</p>",
+        ok: { label: "OK" },
+        rejectClose: false,
+      });
+      return;
+    }
     const input = document.createElement("input");
     input.type = "file";
     input.accept = ".json,application/json";
@@ -1189,24 +1427,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     });
     this._renderEditor();
     this._renderPreview();
-  }
-
-  static _onMoveRuleUp(event, target) {
-    event.stopPropagation();
-    const ruleId = target.dataset.ruleId;
-    if (!ruleId) return;
-    this.ruleManager.moveRuleUp(ruleId);
-    this._renderRulesTree();
-    this._renderPreview();
-  }
-
-  static _onMoveRuleDown(event, target) {
-    event.stopPropagation();
-    const ruleId = target.dataset.ruleId;
-    if (!ruleId) return;
-    this.ruleManager.moveRuleDown(ruleId);
-    this._renderRulesTree();
-    this._renderPreview();
+    if (this.activeTab === "regions") this.regionSelector.activate();
   }
 
   static _onCollapseRule(event, target) {
@@ -1317,7 +1538,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     bar.style.top  = `${clientY + 12}px`;
 
     const canAddToCurrent = !!this.selectedRuleId &&
-      this.ruleManager.getRuleById(this.selectedRuleId)?.ruleType !== 'create-category';
+      !!this.ruleManager.getRuleById(this.selectedRuleId);
 
     bar.innerHTML = `
       <div class="dajb-sel-info">

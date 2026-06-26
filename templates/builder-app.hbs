@@ -53,13 +53,76 @@
       </div>
     </div>
 
-    {{!-- Right: Live Preview --}}
+    {{!-- Right: Live Preview / Select Regions tabs --}}
     <div class="dajb-preview-panel">
-      <div class="panel-header">
-        <span>Live Preview</span>
+      <div class="panel-header dajb-preview-tabbar">
+        <button type="button" class="dajb-preview-tab active" data-tab="preview">Live Preview</button>
+        <button type="button" class="dajb-preview-tab" data-tab="regions">Select Regions</button>
       </div>
-      <div class="dajb-preview-content" id="dajb-preview-content">
-        Load a PDF and select a rule to see matches.
+
+      {{!-- Live Preview tab --}}
+      <div class="dajb-tab-content" data-tab="preview">
+        <div class="dajb-preview-content" id="dajb-preview-content">
+          Load a PDF and select a rule to see matches.
+        </div>
+      </div>
+
+      {{!-- Select Regions tab --}}
+      <div class="dajb-tab-content dajb-region-tab" data-tab="regions" id="dajb-tab-regions" hidden>
+        <div class="dajb-region-bar">
+          <div class="dajb-region-tools">
+            <button type="button" class="dajb-rtool dajb-rtool-alt" data-region-action="toggle-alternating" title="Alternating pages — split Default into A/B so left/right spread pages can use different margins. The first page in range is A, the next B, then alternating.">
+              ⇄ A/B
+            </button>
+            <button type="button" class="dajb-rtool dajb-rtool-default" data-region-action="tool-default" title="Default region — applied at the same coordinates on every page in range. Draw multiple (e.g. columns); text is stitched in draw order.">
+              <span class="dajb-rtool-swatch"></span> <span class="dajb-rtool-label">Default</span>
+            </button>
+            <button type="button" class="dajb-rtool dajb-rtool-defaultB" data-region-action="tool-defaultB" title="Default B — applies to alternating (B) pages only. Draw the margins for the opposite side of the spread here." hidden>
+              <span class="dajb-rtool-swatch"></span> Default B
+            </button>
+            <button type="button" class="dajb-rtool dajb-rtool-exclusion" data-region-action="tool-exclusion" title="Exclusion — carve a section out of the default regions on THIS page only.">
+              <span class="dajb-rtool-swatch"></span> Exclusion
+            </button>
+            <button type="button" class="dajb-rtool dajb-rtool-override" data-region-action="tool-override" title="Override — ignore the default regions on THIS page. Click for: draw new overrides, or apply a saved override template.">
+              <span class="dajb-rtool-swatch"></span> Override <span class="dajb-rtool-caret">▾</span>
+            </button>
+            <button type="button" class="dajb-rtool dajb-rtool-table" data-region-action="tool-table" title="Table Override — mark a section of THIS page as a table. Doesn't change the text stream; a Table rule with 'Import Table Regions' uses these to locate tables.">
+              <span class="dajb-rtool-swatch"></span> Table
+            </button>
+            <button type="button" class="dajb-rtool dajb-rtool-edit" data-region-action="tool-edit" title="Edit — click a region to select it, drag its corner handles to resize, or drag its body to move.">
+              <span class="dajb-rtool-swatch"></span> Edit
+            </button>
+          </div>
+          <div class="dajb-region-nav">
+            <select class="dajb-region-zoom-select" title="Zoom (relative to fit width)">
+              <option value="1.25">125%</option>
+              <option value="1" selected>Fit</option>
+              <option value="0.85">85%</option>
+              <option value="0.75">75%</option>
+            </select>
+            <span class="dajb-region-navsep"></span>
+            <button type="button" data-region-action="prev-page" title="Previous page">◀</button>
+            <span class="dajb-region-pagelabel"></span>
+            <button type="button" data-region-action="next-page" title="Next page">▶</button>
+          </div>
+        </div>
+        <div class="dajb-region-body">
+          <div class="dajb-region-canvas-wrap">
+            <div class="dajb-region-stage">
+              <canvas id="dajb-pdf-canvas" class="dajb-pdf-canvas"></canvas>
+              <canvas id="dajb-region-canvas" class="dajb-region-canvas"></canvas>
+            </div>
+          </div>
+          <button type="button" class="dajb-region-collapse" data-region-action="toggle-side" title="Hide region list">⟩</button>
+          <div class="dajb-region-side">
+            <div class="dajb-region-subtabs">
+              <button type="button" class="dajb-region-subtab active" data-region-tab="thispage">This Page</button>
+              <button type="button" class="dajb-region-subtab" data-region-tab="exceptions">Exceptions</button>
+            </div>
+            <div class="dajb-region-list" id="dajb-region-list"></div>
+            <div class="dajb-region-exceptions" id="dajb-region-exceptions" hidden></div>
+          </div>
+        </div>
       </div>
     </div>
 
