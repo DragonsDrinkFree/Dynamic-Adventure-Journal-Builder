@@ -1023,8 +1023,10 @@ export class PDFParser {
       const col0Text = colItems[0].map(i => i.text).join('').trim();
       const isStandardCont = logicalRows.length > 0 && vrow.length > 0 &&
         colItems[0].length === 0 && vrow[0].x > col0RightEdge;
-      const isWrappedCont  = logicalRows.length > 0 &&
-        colItems[0].length > 0 && colItems[1].length === 0 &&
+      // Wrapped continuation only applies to multi-column tables; a single-column
+      // region has no colItems[1], so guard the access (avoids a crash on 1-col tables).
+      const isWrappedCont  = logicalRows.length > 0 && colCount > 1 &&
+        colItems[0].length > 0 && (colItems[1]?.length ?? 0) === 0 &&
         col0Text.length > maxMarkerWidth;
 
       if (debugPT) {

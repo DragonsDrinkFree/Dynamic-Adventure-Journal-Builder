@@ -4,6 +4,15 @@
 - Updated table design
 - Auto Catagory Rules implemented.
 - Removed the vestigial "New Catagory" rule type — page rules now create the journal and category automatically. Existing "New Catagory" rules are auto-converted to "New Page" on load.
+- Added a badge that shows what rule is being applied to what results to assist with troubleshooting
+- Fixed drag-and-drop rule reordering becoming progressively slower over a long editing session (duplicate drag listeners were being added on every tree refresh).
+
+## Minor
+- Added a welcome message for GMs with links to the wiki, Discord, and Patreon, plus a "do not show again" option.
+- Disabled "load Rules" functionality before PDF is loaded to prevent order of operations issues with fonts.
+
+- Fixed "New Section" rules not showing their type badge in the rules tree.
+
 
 # v1.0.2
 

@@ -56,6 +56,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     this._selectionDebounce = null;
     this._previewRefreshTimer = null;
     this._regionRefreshTimer = null;
+    this._dragDropContainer = null;
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -118,6 +119,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     if (this._previewRefreshTimer) { clearTimeout(this._previewRefreshTimer); this._previewRefreshTimer = null; }
     if (this._regionRefreshTimer) { clearTimeout(this._regionRefreshTimer); this._regionRefreshTimer = null; }
     this.regionSelector?._dismissOverrideMenu?.();
+    this._dragDropContainer = null;
     if (typeof super._onClose === "function") super._onClose(options);
   }
 
@@ -142,6 +144,45 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
   /** Allowed top-level rule types; everything else is child-only. */
   static TOP_LEVEL_TYPES = ["create-page"];
+
+  /** ruleType → [short label, color] for type chips in the tree and preview badges. */
+  static RULE_TYPE_INFO = {
+    "create-page":             ["page",    "#9ade9a"],
+    "create-section":          ["section", "#9ecae1"],
+    "create-collated-section": ["collate", "#e8a838"],
+    "remove-section":          ["remove",  "#c87878"],
+    "create-table":            ["table",   "#a78bfa"],
+    "create-format-text":      ["fmt",     "#6ee7b7"],
+    "strip":                   ["strip",   "#e07878"],
+  };
+
+  /**
+   * Build a small "rule name + type chip" badge for a preview entry header, so the
+   * user can trace a generated block back to the rule that produced it.
+   * Returns null when there's no usable rule.
+   */
+  _buildRuleBadge(rule) {
+    if (!rule?.ruleType) return null;
+    const info = BuilderApp.RULE_TYPE_INFO[rule.ruleType] ?? [rule.ruleType, "#888"];
+    const badge = document.createElement("span");
+    badge.className = "dajb-preview-rule-badge";
+    badge.title = `Rule: ${rule.name || "(unnamed)"} — ${info[0]}`;
+
+    const chip = document.createElement("span");
+    chip.className = "dajb-preview-rule-badge-type";
+    chip.style.color = info[1];
+    chip.style.borderColor = info[1];
+    chip.textContent = info[0];
+    badge.appendChild(chip);
+
+    if (rule.name) {
+      const nm = document.createElement("span");
+      nm.className = "dajb-preview-rule-badge-name";
+      nm.textContent = rule.name;
+      badge.appendChild(nm);
+    }
+    return badge;
+  }
 
   /**
    * Validate a prospective drop.  `destParentId === null` means top level.
@@ -205,6 +246,15 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
   }
 
   _setupRuleDragDrop(container) {
+    // Listeners are delegated (via ev.target.closest), so they keep working after the
+    // tree's innerHTML is rebuilt — there's no need to re-bind on every _renderRulesTree().
+    // Bind once per container element; re-binding would stack duplicate dragover/drop
+    // handlers that never get removed, progressively slowing drags over a long session.
+    // A genuine Foundry full re-render creates a new #dajb-rules-tree element, so we
+    // compare identity rather than using a boolean flag and still bind the fresh one.
+    if (this._dragDropContainer === container) return;
+    this._dragDropContainer = container;
+
     container.addEventListener("dragstart", (ev) => {
       const item = ev.target.closest(".dajb-rule-item");
       if (!item) return;
@@ -298,8 +348,7 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     label.className = "dajb-rule-label";
     label.dataset.action = "select-rule";
     label.dataset.ruleId = rule.id;
-    const typeInfo = { "create-page": ["page","#9ade9a"], "strip": ["strip","#e07878"], "create-collated-section": ["collate","#e8a838"], "remove-section": ["remove","#c87878"], "create-table": ["table","#a78bfa"], "create-format-text": ["fmt","#6ee7b7"] };
-    const ti = typeInfo[rule.ruleType];
+    const ti = BuilderApp.RULE_TYPE_INFO[rule.ruleType];
     if (ti) {
       const badge = document.createElement("span");
       badge.className = "dajb-type-badge";
@@ -874,6 +923,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
     // Section title — render as selectable item spans when underlying items are available
     const titleEl = document.createElement("div");
     titleEl.className = "dajb-preview-section-title";
+    const titleContent = document.createElement("span");
+    titleContent.className = "dajb-preview-title-text";
     if (sec.titleItems?.length) {
       for (const item of sec.titleItems) {
         const span = document.createElement("span");
@@ -884,12 +935,15 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
         span.dataset.color    = item.color;
         span.dataset.isBold   = item.isBold;
         span.dataset.isItalic = item.isItalic;
-        titleEl.appendChild(span);
-        titleEl.appendChild(document.createTextNode(" "));
+        titleContent.appendChild(span);
+        titleContent.appendChild(document.createTextNode(" "));
       }
     } else {
-      titleEl.textContent = sec.title;
+      titleContent.textContent = sec.title;
     }
+    titleEl.appendChild(titleContent);
+    const titleBadge = this._buildRuleBadge(rule);
+    if (titleBadge) titleEl.appendChild(titleBadge);
     el.appendChild(titleEl);
 
     if (sec.bodyItems?.length || sec.body) {
@@ -941,6 +995,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
               const hdr = document.createElement(`h${level}`);
               hdr.className = 'dajb-preview-collate-heading';
               hdr.textContent = cr.groupName;
+              const b = this._buildRuleBadge(cr);
+              if (b) hdr.appendChild(b);
               groupEl.appendChild(hdr);
             }
             const hasGC = cr.children?.some(c => c.ruleType !== 'strip');
@@ -1014,6 +1070,8 @@ export class BuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
             const hdr = document.createElement(`h${level}`);
             hdr.className = 'dajb-preview-collate-heading';
             hdr.textContent = childRule.groupName;
+            const b = this._buildRuleBadge(childRule);
+            if (b) hdr.appendChild(b);
             groupEl.appendChild(hdr);
           }
           if (hasGrandchildren) {

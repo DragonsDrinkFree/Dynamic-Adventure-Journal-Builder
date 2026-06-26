@@ -35,7 +35,6 @@ export class RuleManager {
       minFontSize: null,
       maxFontSize: null,
       // output
-      outputTemplate: "{{match}}",
       preserveFormatting: false,
       breakOnSentence: false, // only split at sentence boundaries (.!?)
       groupName: "",          // if non-empty: all matches are collated under this single heading
@@ -44,7 +43,6 @@ export class RuleManager {
       columnGapMinPt: 4,
       columnGapMultiplier: 0,  // 0 = off; >0 = gap must be ≥ median×multiplier (filters noise)
       maxColumns: 0,           // 0 = auto; N = cap column count at N (keeps N-1 largest gaps)
-      autoDetect: false,       // create-table: detect table regions geometrically
       importTableRegions: false, // create-table: use Table Override regions as table locations
       outputFormat: {
         headingLevel: 1,
@@ -225,7 +223,6 @@ export class RuleManager {
       if (rule.ruleType === 'create-table') {
         if (rule.firstRowHeader === undefined) rule.firstRowHeader = true;
         if (rule.columnGapMinPt === undefined) rule.columnGapMinPt = 4;
-        if (rule.autoDetect === undefined) rule.autoDetect = false;
         if (rule.importTableRegions === undefined) rule.importTableRegions = false;
         if (rule.columnGapMultiplier === undefined) rule.columnGapMultiplier = 0;
         if (rule.maxColumns === undefined) rule.maxColumns = 0;
