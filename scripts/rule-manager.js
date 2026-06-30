@@ -13,14 +13,20 @@ export class RuleManager {
     return {
       id: foundry.utils.randomID(),
       name: "New Rule",
-      // "create-category" | "create-page" | "create-section" | "create-collated-section" | "remove-section" | "strip" | "create-table" | "create-format-text"
+      // "create-page" | "create-section" | "create-collated-section" | "remove-section" | "strip" | "create-table" | "create-format-text"
       ruleType: "create-section",
       disabled: false,
       // top-level only
       pageRanges: "",
       targetJournal: "",
+      // Region selection (top-level page rules only).
+      //   defaults: [{ id, order, x, y, w, h }]  — applied to EVERY page in range
+      //   pages:    { [pageNum]: { exclusions:[{x,y,w,h}], overrides:[{id,order,x,y,w,h}] } }
+      // Coordinates are stored in PDF user units (bottom-left origin), so they are
+      // independent of the on-screen render scale.
+      regions: { defaults: [], defaultsB: [], pages: {}, alternating: false, overrideTemplates: [] },
       // shared
-      targetCategory: "",   // category to create (create-category) or place content into (create-page)
+      targetCategory: "",   // category to place created pages into (create-page)
       // targeting
       pattern: "",
       flags: "gi",
@@ -29,7 +35,6 @@ export class RuleManager {
       minFontSize: null,
       maxFontSize: null,
       // output
-      outputTemplate: "{{match}}",
       preserveFormatting: false,
       breakOnSentence: false, // only split at sentence boundaries (.!?)
       groupName: "",          // if non-empty: all matches are collated under this single heading
@@ -38,7 +43,7 @@ export class RuleManager {
       columnGapMinPt: 4,
       columnGapMultiplier: 0,  // 0 = off; >0 = gap must be ≥ median×multiplier (filters noise)
       maxColumns: 0,           // 0 = auto; N = cap column count at N (keeps N-1 largest gaps)
-      autoDetect: false,       // create-table: detect table regions geometrically
+      importTableRegions: false, // create-table: use Table Override regions as table locations
       outputFormat: {
         headingLevel: 1,
         additionalFormatting: "", // "" | "ul" | "ol" | "blockquote" | "pre" | "secret"
@@ -72,9 +77,11 @@ export class RuleManager {
     let hasPageRule = false;
     this._walk(this.rules, (r) => { if (r.ruleType === 'create-page') hasPageRule = true; });
     const isTopLevel = parentId === null;
+    // Top-level rules are always pages (they create the journal/category and own
+    // page ranges).  Children default to sections once a page rule exists.
     const defaultType = isTopLevel
-      ? (hasPageRule ? 'create-category' : 'create-page')
-      : (hasPageRule ? 'create-section'  : 'create-page');
+      ? 'create-page'
+      : (hasPageRule ? 'create-section' : 'create-page');
     const rule = this._makeRule({ ruleType: defaultType });
     if (parentId === null) {
       this.rules.push(rule);
@@ -148,29 +155,17 @@ export class RuleManager {
     }
   }
 
-  /** Returns [containerArray, index] for the rule, or [null, -1] if not found. */
-  _getContainer(id) {
-    const topIdx = this.rules.findIndex(r => r.id === id);
-    if (topIdx !== -1) return [this.rules, topIdx];
-    let result = [null, -1];
-    this._walk(this.rules, (rule) => {
-      if (result[0]) return;
-      const idx = rule.children?.findIndex(c => c.id === id) ?? -1;
-      if (idx !== -1) result = [rule.children, idx];
-    });
-    return result;
-  }
-
-  moveRuleUp(id) {
-    const [container, idx] = this._getContainer(id);
-    if (!container || idx <= 0) return;
-    [container[idx - 1], container[idx]] = [container[idx], container[idx - 1]];
-  }
-
-  moveRuleDown(id) {
-    const [container, idx] = this._getContainer(id);
-    if (!container || idx === -1 || idx >= container.length - 1) return;
-    [container[idx], container[idx + 1]] = [container[idx + 1], container[idx]];
+  /**
+   * True when `id` is the same as, or a descendant of, `ancestorId`.
+   * Used to reject drag/drop moves that would create a cycle.
+   */
+  isDescendant(ancestorId, id) {
+    if (ancestorId === id) return true;
+    const ancestor = this.getRuleById(ancestorId);
+    if (!ancestor) return false;
+    let found = false;
+    this._walk(ancestor.children ?? [], (rule) => { if (rule.id === id) found = true; });
+    return found;
   }
 
   getRuleById(id) {
@@ -202,6 +197,12 @@ export class RuleManager {
       throw new Error('JSON must have a top-level "rules" array');
     this.rules = data.rules;
     this._walk(this.rules, (rule) => {
+      // Migrate the removed "create-category" type → "create-page". Page rules now
+      // auto-create the journal + target category, so the standalone category rule
+      // is obsolete; converting keeps the rule's journal/category data editable.
+      if (rule.ruleType === 'create-category') rule.ruleType = 'create-page';
+      // Ensure the regions container exists and is well-formed on loaded rules.
+      RuleManager.normalizeRegions(rule);
       // Ensure font size fields exist (min/max are now intentional advanced fields)
       if (rule.fontSize    === undefined) rule.fontSize    = null;
       if (rule.minFontSize === undefined) rule.minFontSize = null;
@@ -222,7 +223,7 @@ export class RuleManager {
       if (rule.ruleType === 'create-table') {
         if (rule.firstRowHeader === undefined) rule.firstRowHeader = true;
         if (rule.columnGapMinPt === undefined) rule.columnGapMinPt = 4;
-        if (rule.autoDetect === undefined) rule.autoDetect = false;
+        if (rule.importTableRegions === undefined) rule.importTableRegions = false;
         if (rule.columnGapMultiplier === undefined) rule.columnGapMultiplier = 0;
         if (rule.maxColumns === undefined) rule.maxColumns = 0;
       }
@@ -237,6 +238,42 @@ export class RuleManager {
         if (fo.lineReturnAfter  === undefined) fo.lineReturnAfter  = false;
       }
     });
+  }
+
+  // ── Regions ────────────────────────────────────────────────────────────────
+
+  /** Ensure a rule's `regions` container exists and is well-formed. Returns it. */
+  static normalizeRegions(rule) {
+    if (!rule.regions || typeof rule.regions !== "object") {
+      rule.regions = { defaults: [], defaultsB: [], pages: {}, alternating: false };
+    }
+    if (!Array.isArray(rule.regions.defaults)) rule.regions.defaults = [];
+    if (!Array.isArray(rule.regions.defaultsB)) rule.regions.defaultsB = [];
+    if (typeof rule.regions.alternating !== "boolean") rule.regions.alternating = false;
+    if (!Array.isArray(rule.regions.overrideTemplates)) rule.regions.overrideTemplates = [];
+    if (!rule.regions.pages || typeof rule.regions.pages !== "object") rule.regions.pages = {};
+    for (const cfg of Object.values(rule.regions.pages)) {
+      if (!Array.isArray(cfg.exclusions)) cfg.exclusions = [];
+      if (!Array.isArray(cfg.overrides))  cfg.overrides  = [];
+      if (!Array.isArray(cfg.tables))     cfg.tables     = [];
+      // Each Table Override region carries its own column cap (default 2).
+      for (const t of cfg.tables) { if (t.maxColumns == null) t.maxColumns = 2; }
+    }
+    return rule.regions;
+  }
+
+  /**
+   * True when a rule defines region constraints that should drive text extraction:
+   * any default region, or any page-specific override region.  (Exclusions only
+   * matter relative to defaults, so they don't independently enable region mode.)
+   */
+  static hasRegions(rule) {
+    const r = rule?.regions;
+    if (!r) return false;
+    if (r.defaults?.length || r.defaultsB?.length) return true;
+    // Override regions reshape the stream; table regions only tag items, but we
+    // still need the region-aware path to run so that tagging happens.
+    return Object.values(r.pages ?? {}).some(p => p.overrides?.length || p.tables?.length);
   }
 
   // ── Page-range parser ─────────────────────────────────────────────────────
@@ -510,6 +547,18 @@ export class RuleManager {
         for (const m of text.matchAll(regex)) {
           boundaries.push({ start: m.index, end: m.index + m[0].length, title: (cg > 0 ? m[cg] : m[0])?.trim() ?? '', source: 'regex', match: m });
         }
+      }
+    }
+
+    // Table Override filter: a boundary whose title lies entirely inside a Table
+    // Override region is table content, not a section header.  Drop it so the items
+    // stay in the body for a Table rule (Import Table Regions) to claim — this keeps
+    // sibling section rules from "stealing" a table's heading row.  (No-op when no
+    // items are tagged, since item.tableRegionId is then always undefined.)
+    if (boundaries.length) {
+      for (let i = boundaries.length - 1; i >= 0; i--) {
+        const its = sliceItems(boundaries[i].start, boundaries[i].end);
+        if (its.length && its.every(it => it.tableRegionId != null)) boundaries.splice(i, 1);
       }
     }
 

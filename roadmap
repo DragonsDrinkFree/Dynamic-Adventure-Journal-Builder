@@ -1,5 +1,50 @@
-# Todo
+# Adventure Journal Builder 2.0 Plan
 
-- Re-Add font Targetting
 
-- Confirm column detection rules mixups. (Winters Daughter ordering wrong.)
+## Auto Catagory
+Currently to add text to a catagory we have to create a "new Catagory" rule. Before our Page rule creates a new page.
+
+We should now look at the "Target Catagory" on a new page rule. In order of operations: Check to see if the Target Journal Exists, if it does not: Create journal. Check to see if the Target Catagory exists: if it does not: create catagory. Then Evaluate page rules and create the page, assigned to the proper catagory. Use the "new catagory" Rule as a baseline for this process.
+
+
+## Enhanced Rule definitions
+This module was one of the first we built, and we've learned a lot about working with PDF's since then. Right now we're loading in the full stream of text from the PDF (As limited by the Page Ranges) and presenting that within the "Live Preview" and applying our rules
+
+I'd like to split the "Live Preview" pane into two tabs, the existing live preview, which shows the text being read from the PDF pages" and a "Select Regions" Tab, which will be defined below.
+
+### Select Regions
+The Select regions tab should show a preview of the actual PDF that is loaded. Loading the Page ranges selected in the "Page Ranges" Section of the Page rule. With controls to switch between the loaded pages.
+
+This tab will be used to draw regions on the PDF preview, and we will only pull text that is within the boundry of the regions. So if we draw a box over the page that covers center text but does not cover the header/footer text, then the header footer text will not end up in our "Live Preview" text stream and will not be included in final rules.
+
+I've added two of our more recent modules into the "Reference" Folder:
+- Dynamic-item-builder
+- Dynamic-table-Manager
+
+Both of these have examples of region drawing and manipulation might function as a baseline, But use that to fit to our current needs.
+
+In particular though "Table Regions" and "Text Regions" for Dynamic-item-builder will probably be relevant.
+
+We will have Three tools as part of the "Select Regions" Tab.
+
+Importantly the x,y calculations of these region rules that follow will need to be added as an updated form of our scheme for exporting/importing rules.
+
+#### Default Region Tool
+The default region will act as a quick apply baseline region. It gets applied at the same coordinates on all pages in the page range, unless overridden by another tool.
+
+IE if we have page ranges 5-10 selected, and we draw a default region on page 5, pages  6-10 all will get the same x,y coordinate region set. The text stream will then be one in which we take all the text within the region on 5, and at the very last word of 5, we stich together the first words of 6, at the end of 6 we stich together the words on 7, and so on.
+
+Thus we will create one continuous stream of text for our "Live preview" to have rules applied to it. The way rules are applied to this final stream should work in the same way rules currently are applied.
+
+It is possible that there may be times when layouts for text are complicated. For example: If a PDF has a two column format, this approach might jumple up text depending on how the PDF is created. So we should be able to draw multiple "Default Regions" on a signle page, IE selecting both collumns, and have it switch them together in the same order as a page and then continue to do so for all additional pages.
+
+
+#### Exclusion Tool
+There may be occasional pages that have bits of text that fall within what would be our default region, but are otherwise "Garbage Text" IE. Some Adventure PDF's will have a map in the middle of a random page, and the map may have a few Points of Interest "A" "B" "C" "D" or some other type of text that is technically PDF text and would be scanned by our parser, but is just casing problems. The exclusion tool should allow us to draw a red region over a page. This red reagion will "Carve out" from the default regions and eliminate sections from the Text stream.
+
+Importantly these exclusion regions will not propogate to multiple pages, They are exceptions. Users will go through their pages and carve out the sections they dont want included. So if we carve out a chunk of page 7 for example, that will not effect pages 5-6, 8-10. It will simply change what text gets stitched together to form the stream.
+
+
+#### Override Tool
+There may be some pages that have wildly different formas, one page that doesn't have two columns where all other pages do. In this case we use the override tool to exclude a page from the default region and draw one or more new regions that cover the proper text covered. Each Override, like the Exclusion tool, is Unique
+

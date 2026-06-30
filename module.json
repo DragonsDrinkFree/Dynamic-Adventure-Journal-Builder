@@ -1,10 +1,10 @@
 {
   "id": "dynamic-adventure-journal-builder",
   "title": "Dynamic Adventure Journal Builder",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "compatibility": {
     "minimum": "13",
-    "verified": "14.359"
+    "verified": "14.364"
   },
   "authors": [
     {
@@ -17,21 +17,14 @@
     "canUpload": true
   },
   "description": "Parse PDFs with regex rules and generate structured Foundry journal entries.",
-  "esmodules": ["scripts/main.js"],
-  "styles": ["styles/builder.css"],
-  "packs": [
+  "esmodules": [
+    "scripts/main.js"
+  ],
+  "styles": [
     {
-      "name": "dynamic-journal-builder",
-      "label": "Dynamic Journal Builder Guide",
-      "path": "packs/dynamic-journal-builder.db",
-      "type": "JournalEntry",
-      "ownership": {
-        "PLAYER": "OBSERVER",
-        "ASSISTANT": "OWNER"
-      }
+      "src": "styles/builder.css"
     }
   ],
-  "url": "",
   "manifest": "https://github.com/DragonsDrinkFree/dynamic-adventure-journal-builder/releases/latest/download/module.json",
-  "download": "https://github.com/DragonsDrinkFree/dynamic-adventure-journal-builder/releases/latest/download/dynamic-adventure-journal-builder.zip"
+  "download": "https://github.com/DragonsDrinkFree/dynamic-adventure-journal-builder/releases/download/1.1.0/dynamic-adventure-journal-builder.zip"
 }
